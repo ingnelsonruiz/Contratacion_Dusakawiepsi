@@ -1,0 +1,48 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+@layer base {
+  :root {
+    --background: 220 20% 97%;
+    --foreground: 220 10% 23%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 10% 23%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 10% 23%;
+    /* Azul institucional Dusakawi, distinto del celeste de Proyecto_Dusakawi
+       para que a simple vista se note que es otra aplicación (Contratación). */
+    --primary: 217 91% 35%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 15% 95%;
+    --secondary-foreground: 220 10% 23%;
+    --muted: 220 15% 95%;
+    --muted-foreground: 220 10% 45%;
+    --accent: 38 92% 50%;
+    --accent-foreground: 0 0% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 220 10% 88%;
+    --input: 220 10% 88%;
+    --ring: 217 91% 35%;
+    --radius: 0.75rem;
+    --chart-1: 217 91% 45%;
+    --chart-2: 38 92% 50%;
+    --chart-3: 145 63% 42%;
+    --chart-4: 0 72% 51%;
+    --chart-5: 271 60% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}

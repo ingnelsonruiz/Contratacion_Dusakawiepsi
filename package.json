@@ -1,0 +1,44 @@
+{
+  "name": "contratacion-dusakawiepi",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "dev": "next dev -p 9010",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "seed:admin": "tsx scripts/seed-admin.ts"
+  },
+  "dependencies": {
+    "@radix-ui/react-label": "^2.1.2",
+    "@radix-ui/react-slot": "^1.1.2",
+    "@radix-ui/react-tabs": "^1.1.3",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "exceljs": "^4.4.0",
+    "lucide-react": "^0.475.0",
+    "next": "15.2.8",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-hook-form": "^7.54.2",
+    "@hookform/resolvers": "^4.1.3",
+    "tailwind-merge": "^3.0.1",
+    "tailwindcss-animate": "^1.0.7",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.20",
+    "dotenv": "^16.5.0",
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "postcss": "^8",
+    "tailwindcss": "^3.4.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5"
+  }
+}
