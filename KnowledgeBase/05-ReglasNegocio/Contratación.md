@@ -150,6 +150,21 @@ Botones "Informe Excel" / "CSV" en ambas pestañas de `ComparativoClient` (`src/
 - `pageSize` de `getComparativoPorMunicipio` dejó de estar topado a 200 fijo — ahora el tope es `LIMITE_FILAS_EXPORTACION` (20.000), permitiendo que la exportación reutilice la misma función pidiendo "una sola página" del tamaño del límite completo, en vez de bifurcar la lógica de filtro/orden en dos lugares.
 - `exportar.ts` ganó `crearLibroExcel()` (workbook vacío) + `agregarHojaExcel()` (agrega una hoja a un workbook ya existente) para poder construir el libro de 3 hojas sin reescribir la lógica de columnas/formato/autofiltro que ya existía en `construirLibroExcel()` (Módulo 1, 1 sola hoja).
 
+### Corrección de precisión — Amplitud % según "Comparar contra" (2026-07-29)
+
+El usuario preguntó cómo se calculaba el indicador "Amplitud" de la vista Comparativo por municipio y, al intentar verificarlo a mano con los datos visibles en pantalla (Mínimo, Máximo, Mediana — cuando "Comparar contra" = Mediana), el número no le cuadraba. Causa raíz: `amplitudPct` (`(máximo - mínimo) / promedio * 100`, en `src/lib/negociacion/comparativo.ts`) **siempre** dividía por el Promedio, sin importar qué referencia tuviera seleccionada el usuario — y el Promedio ni siquiera se muestra en pantalla cuando la referencia activa es Mediana, así que no había forma de verificar el cálculo manualmente.
+
+Se verificó primero con datos reales de producción (código 970101, Valledupar, 8 prestadores: mínimo $21.511, máximo $660.000, mediana $55.895, promedio $146.938) que la fórmula documentada sí correspondía exactamente al 434,53% mostrado, confirmando que el bug era de **transparencia** (dato oculto), no de cálculo incorrecto.
+
+**Fix**: `calcularEstadisticas()` ahora devuelve **ambas** variantes — `amplitudPctPromedio` y `amplitudPctMediana` — igual criterio que ya existía por prestador (`variacionPctPromedio`/`variacionPctMediana`). Nuevo helper `amplitudSegunReferencia(fila, referencia)` es la única fuente de verdad para elegir cuál mostrar/ordenar/exportar según el selector "Comparar contra" de la UI. Se actualizó:
+- El tipo `FilaComparativoCodigo` (`amplitudPct` → `amplitudPctPromedio` + `amplitudPctMediana`).
+- Las 3 funciones que ordenan grupos por amplitud en `comparativo-actions.ts` (`getComparativoPorMunicipio`, `getComparativoMunicipioCompleto`, `getComparativoPorCodigo` — esta última ganó un parámetro `referencia` nuevo, antes no lo recibía).
+- La celda "Amplitud" en `comparativo-client.tsx` y la hoja "Resumen por código" del export (`/api/export/comparativo`), que ahora además exporta ambas variantes como columnas separadas para que quien abra el Excel pueda verificar sin ambigüedad cuál se usó en pantalla.
+
+### Menú emergente de Amplitud + formato sin decimales (mismo día)
+
+Pedido de seguimiento inmediato: la celda de Amplitud ahora se muestra **sin decimales** (`formatearPorcentaje(valor, 0)` — se agregó un parámetro opcional `decimales` a `formatearPorcentaje()` en `src/lib/negociacion/formato.ts`, por defecto 2, sin romper ningún otro uso existente de la función en el proyecto), y un **doble clic** sobre el valor abre un menú emergente (`ModalDetalleAmplitud` en `comparativo-client.tsx`) con la fórmula completa, los 4 datos base (mínimo/máximo/promedio/mediana), el cálculo paso a paso con los números reales de esa fila, cuánto daría con la otra referencia, y la lista de precios por prestador que sustenta el mínimo/máximo. El usuario pidió explícitamente **menú emergente, no tooltip** (hover) — se implementó como overlay propio (`position: fixed` + fondo oscuro + tarjeta centrada) en vez de instalar un componente Dialog de terceros (`@radix-ui/react-dialog` no está instalado en el proyecto — mismo criterio de evitar dependencias nuevas ya aplicado con `recharts`, ver 09-Errores). El encabezado de la columna Amplitud lleva un subtítulo pequeño ("doble clic = cómo se calcula") como pista visual persistente, en vez de un `title` nativo (que sería un tooltip).
+
 ## Reglas implementadas — Módulo 3 (Comparativo Histórico del Prestador) ✅ MVP
 
 ### Origen y decisiones de alcance (2026-07-28)
@@ -204,7 +219,7 @@ Inmediatamente después de lo anterior, 2 pedidos más sobre la misma pantalla:
 1. **Sub-segmentador dentro de "Códigos comparados"**: los 3 conteos que se mostraban como texto plano ("1032 subieron · 259 bajaron · 2754 igual") ahora son 3 botones clicables dentro de la misma tarjeta. Nuevo estado `filtroDireccion: "todos" | "subieron" | "bajaron" | "igual"` en `historico-prestador-client.tsx`, clasificado por el signo de `variacionAbsoluta` (mismo criterio que ya usa `calcularKpisHistoricoPrestador` para esos 3 conteos — no se inventó una regla nueva). Como subieron/bajaron/igual solo tienen sentido dentro de "comparados" (nuevos/eliminados no tienen `variacionAbsoluta`), elegir una dirección fija automáticamente `filtroSegmento = "comparados"`; los botones usan `stopPropagation()` para no disparar también el toggle de la tarjeta completa. El export Excel/CSV acepta el mismo filtro vía query param `direccion` (`subieron`|`bajaron`|`igual`).
 2. **Paginación**: `PAGE_SIZE` subió de 25 a **100** filas por página — el usuario la consideró muy corta para revisar miles de códigos.
 
-
+## Reglas implementadas — Módulo 4 (Consumo y Frecuencia) ✅ MVP
 
 ### Origen — 4ª tarjeta del dashboard, activada 2026-07-28
 
@@ -261,6 +276,126 @@ Clasificación/descripción del código: mismo patrón ya validado en Módulos 1
 - Comparar el consumo facturado contra el valor **contratado** (detectar sobrefacturación/subfacturación) — eso es el objetivo de la tarjeta "Sobrecostos y Ahorro" (Próximamente), un módulo distinto, no una extensión de este.
 - Serie temporal de varios meses en una sola vista (hoy es un mes a la vez) — posible en una 2ª iteración si se valida que el rendimiento de un mes es aceptable en producción real (no solo en el sandbox de desarrollo).
 - Ranking de todos los prestadores a la vez.
+
+## Dashboard Analítico de Competitividad y Riesgo Contractual (Fase A) — nueva pestaña del Módulo 2
+
+### Origen y alcance decidido (2026-07-29)
+
+El usuario pidió un dashboard ejecutivo completo de 12 secciones (KPIs, ranking de riesgo, score 0-100, heatmap, boxplot, detección de outliers IQR/Z-score, ahorro potencial, Top 20, segmentadores por especialidad/grupo CUPS/grupo CUM/complejidad/familia de insumos/año, indicadores estadísticos avanzados, narrativa automática) como pestaña nueva del Módulo 2, ubicada inmediatamente después de "Comparativo por municipio". Antes de escribir código se verificó viabilidad contra el esquema real y se resolvió el alcance con el usuario vía `AskUserQuestion` (mismo criterio ya usado para Módulos 3 y 4):
+
+1. **Fase de construcción**: Fase A (KPIs, ranking de riesgo, score, Top 20, ahorro potencial, narrativa, filtros básicos) — sin boxplot/outliers/indicadores estadísticos avanzados (Fase B, no implementada) ni las partes de esquema no verificado (Fase C).
+2. **Heatmap**: por Municipio solamente (no Municipio × Prestador) — el módulo compara precios **siempre dentro del mismo municipio** (regla ya documentada arriba, para no mezclar variabilidad por ubicación con variabilidad por negociación); un heatmap municipio×prestador cruzaría prestadores de municipios distintos entre sí, contradiciendo esa regla. El heatmap implementado agrega `% de tarifas críticas` y `amplitud promedio` por municipio.
+3. **Segmentadores adicionales**: investigar y agregar los que sí existen en la BD, omitir "Familia de insumos" (sin columna equivalente).
+
+### Hallazgo de esquema — qué segmentadores adicionales son viables (verificado con datos reales antes de construir, no asumido)
+
+| Segmentador pedido | Columna candidata | Resultado de la verificación | ¿Se implementó? |
+|---|---|---|---|
+| Tipo de contrato | `ct_ips_contrato.tipo_contrato` → `tb_tipo_contrato.descripcion` | Viable — valores reales en uso entre contratos vigentes: Capitado (165), Evento (106), PGP (9) | ✅ Sí |
+| Nivel de complejidad | `ct_ips.nivel_complejidad` (smallint 0-3) | Viable — sin tabla de catálogo en la BD, se usa la clasificación estándar del sistema de salud colombiano (0=Sin definir, 1=Baja, 2=Media, 3=Alta) | ✅ Sí |
+| Especialidad | `tb_cup.consecutivo_especialidad_nt` → `tb_especialidad_nt_cup` | `consecutivo_especialidad_nt` está `NULL` en 10.674 de 10.675 filas de `tb_cup` (>99,9%) | ❌ No — el dato no existe en la práctica |
+| Grupo CUPS | `tb_cup.consecutivo_grupo_nt` → `tb_grupo_nt_cup` | `consecutivo_grupo_nt` está `NULL` en el 100% de `tb_cup` (0 de 10.675) | ❌ No |
+| Grupo CUPS (alterno) | `tb_cup.grupo` (smallint, sí poblado 100%) | 10.626 de 10.675 filas (99,5%) tienen el mismo valor (1) — no discrimina nada útil | ❌ No |
+| Grupo CUM | `tb_medicamento.grupo_medicamento` → `tb_grupo_medicamento.descripcion` | El 100% de `tb_medicamento` (71.141 filas) tiene el mismo valor: descripción "No Aplica" — columna poblada pero sin variabilidad real | ❌ No |
+| Familia de insumos | — | `tb_insumo` no tiene columna equivalente (solo `tipo_insumo`, sin verificar qué cataloga) | ❌ No — no hay columna candidata |
+| Año | Derivable de `ct_ips_contrato.fecha_inicio` | Viable en principio, pero no agregado en Fase A por no ser parte del recorte acordado | ⏳ Diferido |
+
+Este hallazgo se comparte porque es reutilizable: si en el futuro se pide "por especialidad" o "por grupo CUPS/CUM" en cualquier otro módulo de este proyecto, la respuesta ya verificada es que esos campos existen en la BD pero **no contienen información real discriminante** — no es un problema de la query, es un dato no diligenciado en el maestro de ARYUWIS.
+
+### Arquitectura de datos — agregación cruzada de municipios, NO una fuente nueva
+
+- `src/types/dashboard-riesgo.ts` — tipos (`KpisDashboardRiesgo`, `FilaRankingRiesgo`, `FilaHeatmapMunicipio`, `FilaDistribucionEstado`, `FilaTopCritico`, `AhorroPotencial`, `ResultadoDashboardRiesgo`).
+- `src/lib/negociacion/dashboard-riesgo.ts` — funciones puras (`construirDashboardRiesgo`, `calcularScoreRiesgo`, `clasificarNivelRiesgo`). Reutiliza `clasificarSemaforo`/`amplitudSegunReferencia` de `comparativo.ts` — nunca reclasifica semáforo con una regla propia.
+- `src/app/actions/dashboard-riesgo-actions.ts` — `getDashboardRiesgoContractual(tipo, filtros)`, `getOpcionesTipoContrato()`, `getOpcionesNivelComplejidad()`, `getOpcionesPrestadoresRiesgo(tipo)`. La query base es la MISMA de `getComparativoPorCodigo` (comparativo-actions.ts) pero **sin filtro de municipio** — trae el tarifario completo de un tipo a través de toda la red, agrupa por (municipio, código) igual que el resto del módulo, aplica `dedupMejorPrecio` (con una clave temporal `municipio__código` para no pisar el mismo código de un prestador entre 2 municipios distintos — se restaura antes de agrupar) y descarta grupos con <2 prestadores, exactamente igual criterio que en el resto del Módulo 2.
+- `src/components/comparativo/dashboard-riesgo-tab.tsx` — componente de UI **separado** de `comparativo-client.tsx` (que ya es grande y tiene historial de corrupción por bytes NUL al editarlo, ver 09-Errores) para aislar el riesgo de edición; `comparativo-client.tsx` solo gana la `TabsTrigger`/`TabsContent` para montarlo.
+- Sin librería de gráficos de terceros (recharts ya falló al instalar en este entorno) — ranking y distribución de estados son barras horizontales con `<div>`+Tailwind (ancho=%), heatmap es una grilla de tarjetas con color de fondo interpolado por CSS (`colorHeatmap()`), no un heatmap SVG real.
+
+### Metodología del Score de Riesgo (0-100) — HEURÍSTICO de priorización, no un modelo estadístico validado
+
+`calcularScoreRiesgo()` combina 4 componentes (cada uno capado en 100) con pesos fijos, documentados aquí para que cualquier ajuste futuro sea deliberado:
+
+```
+componenteCriticas   = min(100, %críticas del prestador × 2)
+componenteAlertas    = min(100, %alertas del prestador × 1.5)
+componenteDesviacion = min(100, promedio de |variación%| absoluta de sus apariciones)
+componenteAmplitud   = min(100, amplitud % promedio de los grupos donde participa)
+
+score = round(0.40×criticas + 0.20×alertas + 0.25×desviación + 0.15×amplitud)
+```
+
+Cortes: `<25` 🟢 Bajo · `25–49` 🟡 Medio · `50–74` 🟠 Alto · `≥75` 🔴 Muy Alto. El ranking se ordena por **costo potencial adicional** (suma de sobrecostos en apariciones crítico/alerta), no por el score — es la métrica más accionable para priorizar negociación, el score es un resumen complementario.
+
+> [!warning] "Costo potencial adicional" y "Ahorro potencial" son estimados POR UNIDAD TARIFADA, no proyectados por volumen real de servicios prestados — este dashboard vive sobre el tarifario contratado (miles de filas), no sobre RIPS reales facturados (eso es el Módulo 4, Consumo y Frecuencia). Cruzar ambos para un ahorro proyectado por volumen real es trabajo de una fase futura, no de este MVP.
+
+### Ahorro potencial — solo sobre tarifas críticas
+
+Pedido explícito del usuario: *"si todas las tarifas críticas fueran negociadas al valor de la mediana"*. Se calcula únicamente sobre apariciones clasificadas `crítico` (nunca `alerta`, aunque el costo potencial adicional del ranking sí incluye ambas) — `ahorro = valorFinal − valorReferencia` (mediana o promedio, según "Comparar contra"), sumado por prestador y por municipio.
+
+### Ajuste de seguimiento (mismo día, 2026-07-29) — menú emergente de doble clic en cada KPI
+
+Pedido inmediato del usuario tras ver el dashboard: *"es bueno saber cómo se calculan los KPI... y que yo pueda dar doble clic y que me lleve a esa información que genera ese KPI"*. Mismo patrón ya usado para "Amplitud" en el Módulo 2 (menú emergente propio, no tooltip de hover).
+
+**Corrección del mismo día, inmediatamente después de la primera versión**: la primera implementación mostraba solo la fórmula y una descripción textual de cómo se calcula cada KPI (`explicacionKpi()`, texto puro). El usuario corrigió explícitamente: *"el doble clic no me refiero a esa información que me das es los datos de donde me lo traes, la fuente, que el analista pueda ir a ver que datos generaron eso, los procedimientos, los valores, no la descripción del KPI como tal"*. Es decir: el doble clic debe llevar al **dato fuente real** (códigos, prestadores, valores concretos), no a un texto explicativo. Se reemplazó por completo el enfoque:
+
+- **Las 10 tarjetas KPI ejecutivas** ahora tienen doble clic → `ModalInfo` con una línea corta de contexto (`formulaCortaKpi()`) y, como contenido principal, `TablaFuenteKpi` (`dashboard-riesgo-tab.tsx`): una tabla real con las filas concretas que generan ese número, tomada de datos ya calculados en el servidor:
+  - "Prestadores"/"Municipios" → filas de `resultado.ranking`/`resultado.heatmap`.
+  - "Códigos comparables", "Valor promedio de mercado", "Variabilidad promedio" → filas de `resultado.detalleGrupos` (un grupo municipio+código con min/máx/promedio/mediana/amplitud), ordenadas según el KPI (por amplitud, por promedio, o por código).
+  - "Tarifas críticas/alerta/OK/favorables/muy favorables" y "% negociación crítica" → filas de `resultado.detallePorNivel[nivel]` (apariciones código+prestador+municipio individuales con su valor, referencia y diferencia), acotadas a las 200 de mayor variación por nivel (`TOP_ENTRADAS_POR_NIVEL` en `dashboard-riesgo.ts`, vía `construirDetallePorNivel()`) para no inflar el payload.
+  - Todo renderizado con `TablaGenerica` (tabla con encabezado fijo y scroll), sin recalcular nada en el cliente.
+  - Se extendió el modelo de datos en `src/types/dashboard-riesgo.ts`: `FilaEntradaDetalle`, `FilaDetalleGrupo`, `DetallePorNivel` (nuevos), y `ResultadoDashboardRiesgo` ganó `detallePorNivel`/`detalleGrupos`.
+- **Cada fila del ranking de riesgo** tiene doble clic → modal con el desglose completo del score: los 4 componentes (críticas/alertas/desviación/amplitud) con su fórmula y valor real, el score final con su nivel, la fórmula y valor del costo potencial adicional, y una tabla con los códigos que más aportan al sobrecosto de ESE prestador — esta parte ya mostraba dato real desde la primera versión y no necesitó corrección.
+- Para poder mostrar esta última tabla sin recalcular nada en el cliente, `FilaRankingRiesgo` (`src/types/dashboard-riesgo.ts`) ganó campos nuevos: `componenteCriticas/Alertas/Desviacion/Amplitud`, `pctAlerta`, `amplitudPromedio`, `cantidadSobrecostos` y `detalleSobrecostos: FilaDetalleSobrecosto[]` (las hasta 25 apariciones crítico/alerta con mayor diferencia absoluta de ese prestador — acotado con `TOP_SOBRECOSTOS_POR_PRESTADOR` en `dashboard-riesgo.ts` para no inflar el payload en prestadores con cientos/miles de códigos críticos; `cantidadSobrecostos` conserva el total real aunque se hayan recortado las filas mostradas).
+- `calcularScoreRiesgo()` se refactorizó en `calcularComponentesRiesgo()` (devuelve los 4 componentes + el score) — `calcularScoreRiesgo()` se conserva como wrapper delgado para no romper nada que ya lo usara.
+
+### Fuera de alcance de esta Fase A (Fase B/C, no implementadas)
+
+- Boxplot por procedimiento (mínimo/Q1/mediana/Q3/máximo/valor del prestador) y marcado de outliers.
+- Detección estadística de outliers vía IQR, Z-score o desviación estándar.
+- Indicadores estadísticos avanzados: moda, coeficiente de variación, percentiles 25/50/75, rango intercuartílico como medida independiente de la amplitud.
+- Segmentadores por Especialidad/Grupo CUPS/Grupo CUM/Familia de insumos (ver tabla de hallazgo arriba) y por Año.
+- Exportación a Excel/PDF de este dashboard específico (los demás módulos sí exportan; este queda pendiente para cuando se defina el layout final de las 12 secciones).
+
+## Perfil Competitivo del Prestador — nueva tarjeta independiente del dashboard (2026-07-29)
+
+Pedido explícito del usuario tras ver "Comparativo entre Prestadores" y "Comparativo Histórico del Prestador": *"necesito una tarjeta que analice un prestador en sí contra prestadores del mismo municipio... que se pueda realizar análisis sobre un solo prestador... necesito una tarjeta aparte"*. Confirmado por `AskUserQuestion`: contenido completo (KPIs + tabla detallada + export) y alcance de todos los municipios donde opera el prestador a la vez (no uno por uno).
+
+### Qué es y qué NO es
+
+Complementa a "Comparativo Histórico del Prestador" (Módulo 3, dimensión **temporal**: cómo cambió la tarifa de ESTE prestador entre 2025 y hoy) con la dimensión de **pares**: cómo se compara ESTE prestador HOY contra los demás prestadores del mismo municipio, código por código. No es una fuente de datos nueva ni una consulta nueva: reutiliza tal cual la infraestructura ya construida para el Dashboard Analítico de Riesgo (Fase A, sección anterior de este documento).
+
+- Componente: `src/components/perfil-prestador/perfil-prestador-client.tsx`. Página: `/perfil-prestador` (`src/app/(protegido)/perfil-prestador/page.tsx`). Tarjeta nueva en el dashboard principal (`src/app/(protegido)/dashboard/page.tsx`).
+- Tipos: `src/types/perfil-prestador.ts`. Helper puro: `src/lib/negociacion/perfil-prestador.ts` (`construirPerfilPrestador`). Server Action: `src/app/actions/perfil-prestador-actions.ts` (`getPerfilPrestador`).
+
+### Por qué requiere elegir "Tipo de tarifario" primero (a diferencia de Módulo 3)
+
+Se evaluó fusionar servicios+medicamentos+insumos en una sola vista (como hace Módulo 3, que mezcla los 4 tipos con una columna "Tipo"), pero se descartó por **costo de la consulta**: `construirGruposTodosMunicipios` (reutilizada del Dashboard de Riesgo) ya recorre TODO el tarifario de un tipo a través de todos los municipios — es la misma consulta que ya necesitó una barra de progreso por su duración. Triplicarla (una vez por tipo) para fusionar resultados habría sido un riesgo de rendimiento no justificado. Se mantiene el mismo patrón que "Comparativo entre Prestadores"/Dashboard de Riesgo: selector de Tipo de tarifario primero, luego selector de prestador (cuyas opciones dependen del tipo — un prestador puede no tener contrato de un tipo dado).
+
+### Cómo se calcula — reutilización, no duplicación
+
+`construirPerfilPrestador(ips, tipo, razonSocial, nit, grupos, referencia, umbrales)`:
+
+1. Llama a `construirDashboardRiesgo()` (ya existente) con los mismos `grupos` — esto calcula el ranking de riesgo de **todos** los prestadores del tipo a la vez (mismo costo que ya paga el Dashboard de Riesgo).
+2. Extrae de `dashboard.ranking` la fila (`FilaRankingRiesgo`) de este `ips` específico → es el "resumen ejecutivo" (score, % crítico/alerta, costo potencial adicional, municipios donde opera). Si el prestador no aparece en el ranking (nunca tuvo 2+ prestadores en el mismo municipio para ese tipo), `resumen` es `null` y la UI muestra un mensaje explicando por qué no hay comparación posible, en vez de una tabla vacía.
+3. Calcula también la posición (`indiceEnRanking + 1`) y el total de prestadores en el ranking — fuente de la tarjeta "Posición en el ranking".
+4. Llama a `aplanarEntradas()` (exportada de `dashboard-riesgo.ts` para esta reutilización) y filtra a las apariciones de este `ips` — a diferencia de `detalleSobrecostos` del ranking (que se acota a los 25 mayores sobrecostos porque ahí conviven TODOS los prestadores), aquí se devuelven **todos** los códigos de este prestador sin recortar, porque el payload ya está naturalmente acotado a un solo prestador.
+
+**Advertencia crítica documentada en el código** (`construirGruposTodosMunicipios`, `dashboard-riesgo-actions.ts`): la consulta de grupos **nunca** debe llamarse con el filtro `ips` puesto para este módulo — eso dejaría grupos de 1 solo prestador (sin pares), y el filtro `filas.length < 2` de la propia función los descartaría todos. El filtrado a un prestador específico ocurre **después**, sobre los grupos ya completos (con todos sus pares), exactamente igual a como ya lo hace el Dashboard de Riesgo.
+
+### Metodología de comparación — igual que el resto del Módulo 2
+
+Cada código se compara contra el promedio/mediana del grupo completo, que **incluye** al propio prestador (no se excluye para calcular "contra sus pares") — mismo criterio ya usado en todo el Módulo 2 (`variacionPctPromedio`/`variacionPctMediana` en `PrestadorValorComparativo`). No se introdujo una metodología nueva de "comparación contra pares excluyendo al propio prestador".
+
+### UI — ajustes de seguimiento el mismo día (feedback inmediato del usuario tras ver la primera versión)
+
+1. **Acordeón por código** (`FilaCodigoPerfilRow`, mismo patrón que `FilaHistoricoExpandible` de Módulo 3): clic en la fila expande una segunda fila mostrando **todos** los prestadores del grupo (código+municipio), ordenados de menor a mayor valor, con el propio prestador resaltado (`esEstePrestador`). Requirió agregar `prestadoresGrupo: PrestadorGrupoPerfil[]` a `FilaCodigoPerfil` — se puebla directamente desde `e.grupo.prestadores` (ya disponible en `FilaComparativoCodigo`, no requiere una consulta nueva).
+2. **Tooltips explicativos** (`InfoTooltip`, ícono "i" con atributo `title` nativo — sin dependencia nueva) en "Score de riesgo" y "Posición en el ranking": el usuario pidió explícitamente un tooltip aquí, a diferencia del menú emergente de doble clic ya usado para Amplitud/KPIs del Dashboard de Riesgo (esas son "fuente de datos", este es "qué significa el número").
+3. **Doble clic en "Posición en el ranking" → modal con el ranking completo** (`ModalOverlay` + `TablaRankingCompleto`, mismo patrón de overlay ya usado en `dashboard-riesgo-tab.tsx`): muestra `resultado.rankingCompleto` (el `dashboard.ranking` completo, expuesto tal cual en `ResultadoPerfilPrestador` — no se recalcula nada, ya se había calculado en el paso 1 de `construirPerfilPrestador`), resaltando la fila de este prestador.
+4. **Columna Descripción se veía cortada**: la primera versión usaba `truncate` (ellipsis a una sola línea) en una columna de 260px — el texto real de las descripciones de procedimientos suele ser más largo. Se quitó `truncate` y se cambió a `whitespace-normal break-words` con `min-w-[260px] max-w-[420px]`, para que el texto envuelva en varias líneas y se lea completo sin depender de pasar el mouse.
+5. **Número de contrato visible, tanto del prestador analizado como de sus pares** (pedido inmediato: "para ubicar rápidamente su número de contrato"): `PrestadorValorComparativo` ya traía `numeroContrato` (mismo dato usado en Módulos 1/2/3), solo hacía falta exponerlo en este módulo. Se agregó `numeroContratoPrestador` a `FilaCodigoPerfil` (buscando la fila de este `ips` dentro de `e.grupo.prestadores`, sin consulta nueva) y `numeroContrato` a cada `PrestadorGrupoPerfil` del acordeón. La fila principal muestra el contrato del prestador bajo su valor (mismo patrón "valor + contrato apilados" de Módulo 3); el acordeón muestra el contrato de cada par; el export Excel/CSV agrega una columna "Contrato del prestador" y otra "Otros prestadores del grupo" con razón social · NIT · contrato · valor de cada uno, para poder ubicar cualquier tarifa en ARYUWIS sin volver a consultar la BD.
+
+### Verificación de datos (2026-07-29, antes de construir)
+
+Se probaron directamente contra la BD real (solo lectura) las 4 consultas de opciones que alimentan la pantalla (municipios, tipo de contrato, nivel de complejidad, prestadores) — todas devuelven filas correctamente. El caso reportado inicialmente por el usuario ("no me muestra municipios para cargar el dashboard") no era un bug: el dropdown se veía vacío porque el componente aún estaba en el estado de carga inicial (la pantalla "Calculando dashboard…" sin indicador de progreso hacía parecer que estaba trabado) — resuelto agregando la barra de progreso simulada (ver sección del Dashboard de Riesgo, "Ajuste de seguimiento — barra de progreso").
 
 ## Ver también
 - [[Validaciones]]

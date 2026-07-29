@@ -5,6 +5,7 @@ import { getSession } from "@/lib/auth";
 import FileSpreadsheet from "lucide-react/icons/file-spreadsheet";
 import Scale from "lucide-react/icons/scale";
 import History from "lucide-react/icons/history";
+import UserSearch from "lucide-react/icons/user-search";
 import Activity from "lucide-react/icons/activity";
 import TrendingDown from "lucide-react/icons/trending-down";
 import FlaskConical from "lucide-react/icons/flask-conical";
@@ -31,6 +32,13 @@ const MODULOS = [
     descripcion: "Evolución de la tarifa negociada con un mismo prestador: foto 2025 vs. valor vigente hoy, por código.",
     estado: "Disponible",
     href: "/historico-prestador",
+  },
+  {
+    icono: UserSearch,
+    titulo: "Perfil Competitivo del Prestador",
+    descripcion: "Analiza UN prestador contra sus pares del mismo municipio: score de riesgo, posición en el ranking y detalle código por código.",
+    estado: "Disponible",
+    href: "/perfil-prestador",
   },
   {
     icono: Activity,

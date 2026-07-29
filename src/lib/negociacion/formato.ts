@@ -50,10 +50,15 @@ export function formatearMoneda(valor: number | null | undefined): string {
   }).format(numero);
 }
 
-/** Formato de porcentaje con hasta 2 decimales, sin ceros de más (ej. "12%", "12.5%"). */
-export function formatearPorcentaje(valor: number | null | undefined): string {
+/**
+ * Formato de porcentaje, sin ceros de más (ej. "12%", "12.5%"). `decimales`
+ * opcional (por defecto 2) — agregado 2026-07-29 para poder pedir 0
+ * decimales en columnas puntuales (ej. Amplitud en el Módulo 2) sin afectar
+ * el resto de usos de esta función en el proyecto.
+ */
+export function formatearPorcentaje(valor: number | null | undefined, decimales: number = 2): string {
   const numero = Number(valor ?? 0);
-  return `${new Intl.NumberFormat("es-CO", { maximumFractionDigits: 2 }).format(numero)}%`;
+  return `${new Intl.NumberFormat("es-CO", { maximumFractionDigits: decimales }).format(numero)}%`;
 }
 
 /** Formato de fecha corta es-CO (dd/mm/aaaa) a partir de un ISO string o Date. */

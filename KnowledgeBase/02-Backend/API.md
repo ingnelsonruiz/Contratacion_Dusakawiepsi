@@ -5,7 +5,7 @@ tags: [backend, api]
 # API
 
 > [!warning] Estado actual
-> El proyecto tiene 4 **Route Handlers reales**: `GET /api/export/tarifario` (Módulo 1), `GET /api/export/comparativo` (Módulo 2), `GET /api/export/historico-prestador` (Módulo 3) y `GET /api/export/consumo-frecuencia` (Módulo 4), todos exportación binaria Excel/CSV. El resto de operaciones de lectura/escritura sigue pasando por **Server Actions** (ver [[Servicios]]), siguiendo la convención: Server Actions para todo lo que no sea un archivo binario, Route Handlers solo para descargas. Este documento describe tanto lo existente como el diseño planificado en `docs/ARQUITECTURA.md` §2.3.
+> El proyecto tiene 5 **Route Handlers reales**: `GET /api/export/tarifario` (Módulo 1), `GET /api/export/comparativo` (Módulo 2), `GET /api/export/historico-prestador` (Módulo 3), `GET /api/export/consumo-frecuencia` (Módulo 4) y `GET /api/export/perfil-prestador` (Perfil Competitivo del Prestador), todos exportación binaria Excel/CSV. El resto de operaciones de lectura/escritura sigue pasando por **Server Actions** (ver [[Servicios]]), siguiendo la convención: Server Actions para todo lo que no sea un archivo binario, Route Handlers solo para descargas. Este documento describe tanto lo existente como el diseño planificado en `docs/ARQUITECTURA.md` §2.3.
 
 ## Por qué Server Actions y no solo API REST
 
@@ -45,6 +45,23 @@ El stack usa **Server Actions para mutaciones desde componentes** y reserva **Ro
 - **Implementación**: llama a `getConsumoPrestador(codigoPrestador, mes, anio)` (`src/app/actions/consumo-frecuencia-actions.ts`), que filtra `rips_af` por prestador+mes (Seq Scan de ~6-8s, tabla más pequeña de las RIPS) y desde ahí cruza por `consecutivo_rips` (indexado) contra `rips_ap`/`rips_am`/`rips_at` — ver detalle completo y hallazgo de rendimiento en [[Contratación#Reglas implementadas — Módulo 4 (Consumo y Frecuencia) ✅ MVP]].
 - **Excel**: 2 hojas — "Parámetros" y "Consumo por código".
 - Por diseño, **no acepta rango de fechas abierto** — solo un mes a la vez, para no arriesgar timeout del proxy sobre tablas de cientos de millones de filas sin índice de fecha.
+
+## `GET /api/export/perfil-prestador` ✅ Implementado
+
+- **Archivo**: `src/app/api/export/perfil-prestador/route.ts`.
+- **Query params**: `ips` (obligatorio), `tipo` (`servicios`|`medicamentos`|`insumos`, por defecto `servicios`), `referencia` (`promedio`|`mediana`), `alertaPct`/`criticoPct`, `nivel` (`NivelSemaforo` opcional, filtra el detalle a un solo estado), `formato` (`xlsx`|`csv`).
+- **Implementación**: llama a `getPerfilPrestador(ips, tipo, referencia, umbrales)` (la misma Server Action que usa la UI) y exporta `resultado.codigos` (sin acotar). 2 hojas en Excel — "Parámetros" (incluye score de riesgo y posición en el ranking) y "Detalle por código".
+- Ver detalle completo de la metodología en [[Contratación#Perfil Competitivo del Prestador — nueva tarjeta independiente del dashboard (2026-07-29)]].
+
+## Server Actions de "Perfil Competitivo del Prestador" — nueva tarjeta independiente del Módulo 2
+
+- **Archivo**: `src/app/actions/perfil-prestador-actions.ts`. Solo lectura.
+
+| Server Action | Propósito |
+|---|---|
+| `getPerfilPrestador(ips, tipo, referencia, umbrales)` | Perfil completo de UN prestador: resumen ejecutivo (score/ranking/costo potencial, reutilizando `construirDashboardRiesgo`), posición en el ranking global, y el detalle código por código (sin acotar) contra sus pares del mismo municipio |
+
+Reutiliza `construirGruposTodosMunicipios` y `getOpcionesPrestadoresRiesgo` (ambas exportadas de `dashboard-riesgo-actions.ts` para esta reutilización) — no duplica ninguna consulta SQL. Ver metodología completa en [[Contratación#Perfil Competitivo del Prestador — nueva tarjeta independiente del dashboard (2026-07-29)]].
 
 ## Endpoints planificados (aún no implementados)
 
@@ -112,6 +129,19 @@ if (result.success) {
 | `getOpcionesFiltro()` | Opciones para los `<select>` de filtro (estados y tipos de contrato realmente usados) | — |
 
 Se invocan **directamente desde Client Components** (`src/components/tarifarios/tabla-tarifario.tsx`, `tarifario-detalle-client.tsx`) vía RPC de Next.js — permite cambiar de pestaña, página o buscar sin recargar la página completa, sin necesitar TanStack Query ni una API REST intermedia.
+
+## Server Actions del Dashboard Analítico de Riesgo Contractual (Fase A) — pestaña nueva del Módulo 2
+
+- **Archivo**: `src/app/actions/dashboard-riesgo-actions.ts`. Solo lectura.
+
+| Server Action | Propósito |
+|---|---|
+| `getDashboardRiesgoContractual(tipo, filtros)` | KPIs/ranking/heatmap/Top20/ahorro/narrativa, agregando el tarifario de un tipo a través de TODOS los municipios (no una fuente nueva — misma query base que `getComparativoPorCodigo`, sin filtro de municipio) |
+| `getOpcionesTipoContrato()` | Opciones del filtro "Tipo de contrato" (Capitado/Evento/PGP) |
+| `getOpcionesNivelComplejidad()` | Opciones del filtro "Nivel de complejidad" (0-3, sin catálogo en BD — etiquetas estándar del sistema de salud colombiano) |
+| `getOpcionesPrestadoresRiesgo(tipo)` | Opciones del filtro "Prestador" |
+
+Ver metodología completa (score de riesgo, ahorro potencial, hallazgo de qué segmentadores adicionales son viables) en [[Contratación#Dashboard Analítico de Competitividad y Riesgo Contractual (Fase A) — nueva pestaña del Módulo 2]].
 
 ## Ver también
 - [[Servicios]]

@@ -20,14 +20,29 @@ export interface EstadisticasValor {
   maximo: number;
   promedio: number;
   mediana: number;
-  /** (máximo - mínimo) / promedio * 100 — qué tan amplia es la variabilidad real del grupo. */
-  amplitudPct: number;
+  /**
+   * (máximo - mínimo) / referencia * 100 — qué tan amplia es la variabilidad
+   * real del grupo. Se calculan las DOS variantes (contra promedio y contra
+   * mediana) — igual criterio que `variacionPctPromedio`/`variacionPctMediana`
+   * por prestador (ver PrestadorValorComparativo): el usuario elige cuál
+   * mirar en la UI ("Comparar contra") sin volver a consultar la BD, y ambas
+   * quedan disponibles para ordenar/exportar con el mismo criterio.
+   *
+   * Corrección 2026-07-29 (reportada por el usuario): antes solo existía
+   * `amplitudPct` calculado SIEMPRE contra el promedio, sin importar qué
+   * referencia tuviera seleccionada en pantalla — si el usuario tenía
+   * "Comparar contra: Mediana" seleccionado, el número de Amplitud no
+   * coincidía con ningún cálculo manual posible desde los datos visibles
+   * (el Promedio ni siquiera se mostraba en esa vista).
+   */
+  amplitudPctPromedio: number;
+  amplitudPctMediana: number;
 }
 
-/** Calcula min/máx/promedio/mediana/amplitud de un conjunto de valores (uno por prestador, ya deduplicado). */
+/** Calcula min/máx/promedio/mediana/amplitud (ambas variantes) de un conjunto de valores (uno por prestador, ya deduplicado). */
 export function calcularEstadisticas(valores: number[]): EstadisticasValor {
   if (valores.length === 0) {
-    return { minimo: 0, maximo: 0, promedio: 0, mediana: 0, amplitudPct: 0 };
+    return { minimo: 0, maximo: 0, promedio: 0, mediana: 0, amplitudPctPromedio: 0, amplitudPctMediana: 0 };
   }
 
   const ordenados = [...valores].sort((a, b) => a - b);
@@ -39,9 +54,18 @@ export function calcularEstadisticas(valores: number[]): EstadisticasValor {
   const mediana =
     ordenados.length % 2 !== 0 ? ordenados[mitad] : (ordenados[mitad - 1] + ordenados[mitad]) / 2;
 
-  const amplitudPct = promedio > 0 ? ((maximo - minimo) / promedio) * 100 : 0;
+  const amplitudPctPromedio = promedio > 0 ? ((maximo - minimo) / promedio) * 100 : 0;
+  const amplitudPctMediana = mediana > 0 ? ((maximo - minimo) / mediana) * 100 : 0;
 
-  return { minimo, maximo, promedio, mediana, amplitudPct };
+  return { minimo, maximo, promedio, mediana, amplitudPctPromedio, amplitudPctMediana };
+}
+
+/** Amplitud del grupo según la referencia elegida en pantalla — única fuente de verdad, usada al ordenar (servidor) y al mostrar/exportar. */
+export function amplitudSegunReferencia(
+  fila: { amplitudPctPromedio: number; amplitudPctMediana: number },
+  referencia: ReferenciaVariacion
+): number {
+  return referencia === "promedio" ? fila.amplitudPctPromedio : fila.amplitudPctMediana;
 }
 
 /** Variación porcentual de un valor puntual respecto a una referencia (promedio o mediana del grupo). */

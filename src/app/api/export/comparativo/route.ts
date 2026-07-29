@@ -4,7 +4,7 @@ import {
   getComparativoMunicipioCompleto,
   getComparativoPorCodigo,
 } from "@/app/actions/comparativo-actions";
-import { filtrarYRecortarPorEstados, etiquetaNivelSemaforo, clasificarSemaforo } from "@/lib/negociacion/comparativo";
+import { filtrarYRecortarPorEstados, etiquetaNivelSemaforo, clasificarSemaforo, amplitudSegunReferencia } from "@/lib/negociacion/comparativo";
 import {
   construirCsv,
   crearLibroExcel,
@@ -65,18 +65,36 @@ function sanearNombreArchivo(texto: string): string {
     .replace(/^_|_$/g, "");
 }
 
-const COLUMNAS_RESUMEN: ColumnaExportable<FilaComparativoCodigo>[] = [
-  { header: "Departamento", valor: (f) => f.departamentoNombre, anchoExcel: 18 },
-  { header: "Municipio", valor: (f) => f.municipioNombre, anchoExcel: 18 },
-  { header: "Código", valor: (f) => f.codigoTarifa, anchoExcel: 14 },
-  { header: "Descripción", valor: (f) => f.descripcion, anchoExcel: 45 },
-  { header: "Prestadores", valor: (f) => f.cantidadPrestadores, formato: "entero", anchoExcel: 12 },
-  { header: "Mínimo", valor: (f) => f.minimo, formato: "moneda", anchoExcel: 16 },
-  { header: "Máximo", valor: (f) => f.maximo, formato: "moneda", anchoExcel: 16 },
-  { header: "Promedio", valor: (f) => f.promedio, formato: "moneda", anchoExcel: 16 },
-  { header: "Mediana", valor: (f) => f.mediana, formato: "moneda", anchoExcel: 16 },
-  { header: "Amplitud %", valor: (f) => Number(f.amplitudPct.toFixed(2)), formato: "porcentaje", anchoExcel: 14 },
-];
+/**
+ * Columnas de la hoja "Resumen por código" — función de `referencia` (no una
+ * constante estática) desde 2026-07-29: la Amplitud % ya no se calcula
+ * siempre contra el Promedio, depende de "Comparar contra" (ver
+ * `amplitudSegunReferencia` en src/lib/negociacion/comparativo.ts). Se
+ * exportan ambas variantes (Promedio y Mediana) para que quien abra el Excel
+ * pueda verificar el cálculo sin ambigüedad, con la seleccionada en pantalla
+ * marcada en el encabezado.
+ */
+function construirColumnasResumen(referencia: ReferenciaVariacion): ColumnaExportable<FilaComparativoCodigo>[] {
+  return [
+    { header: "Departamento", valor: (f) => f.departamentoNombre, anchoExcel: 18 },
+    { header: "Municipio", valor: (f) => f.municipioNombre, anchoExcel: 18 },
+    { header: "Código", valor: (f) => f.codigoTarifa, anchoExcel: 14 },
+    { header: "Descripción", valor: (f) => f.descripcion, anchoExcel: 45 },
+    { header: "Prestadores", valor: (f) => f.cantidadPrestadores, formato: "entero", anchoExcel: 12 },
+    { header: "Mínimo", valor: (f) => f.minimo, formato: "moneda", anchoExcel: 16 },
+    { header: "Máximo", valor: (f) => f.maximo, formato: "moneda", anchoExcel: 16 },
+    { header: "Promedio", valor: (f) => f.promedio, formato: "moneda", anchoExcel: 16 },
+    { header: "Mediana", valor: (f) => f.mediana, formato: "moneda", anchoExcel: 16 },
+    {
+      header: `Amplitud % (usada en pantalla: vs. ${referencia === "promedio" ? "Promedio" : "Mediana"})`,
+      valor: (f) => Number(amplitudSegunReferencia(f, referencia).toFixed(2)),
+      formato: "porcentaje",
+      anchoExcel: 30,
+    },
+    { header: "Amplitud % vs. Promedio", valor: (f) => Number(f.amplitudPctPromedio.toFixed(2)), formato: "porcentaje", anchoExcel: 18 },
+    { header: "Amplitud % vs. Mediana", valor: (f) => Number(f.amplitudPctMediana.toFixed(2)), formato: "porcentaje", anchoExcel: 18 },
+  ];
+}
 
 interface FilaDetalle {
   departamento: string;
@@ -172,7 +190,7 @@ export async function GET(request: NextRequest) {
       );
       nombreArchivoBase = `Comparativo_${resultado.municipioNombre}_${ETIQUETAS_TIPO[tipo]}`;
     } else {
-      const resultadoCompleto = await getComparativoPorCodigo(busqueda!, tipo, municipio || undefined);
+      const resultadoCompleto = await getComparativoPorCodigo(busqueda!, tipo, municipio || undefined, referencia);
       grupos = filtrarYRecortarPorEstados(resultadoCompleto, referencia, umbrales, estadosFiltro);
       filasParametros.push({ Parámetro: "Código/descripción buscado", Valor: busqueda! });
       if (municipio) {
@@ -212,7 +230,7 @@ export async function GET(request: NextRequest) {
         ],
         "Parámetros"
       );
-      agregarHojaExcel(workbook, grupos, COLUMNAS_RESUMEN, "Resumen por código");
+      agregarHojaExcel(workbook, grupos, construirColumnasResumen(referencia), "Resumen por código");
       agregarHojaExcel(workbook, detalle, COLUMNAS_DETALLE, "Detalle por prestador");
       const arrayBuffer = await workbook.xlsx.writeBuffer();
       buffer = Buffer.from(arrayBuffer);

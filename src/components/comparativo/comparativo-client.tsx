@@ -18,8 +18,9 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
 import { Paginacion } from "@/components/tarifarios/paginacion";
 import { formatearMoneda, formatearPorcentaje } from "@/lib/negociacion/formato";
-import { clasificarSemaforo, etiquetaNivelSemaforo } from "@/lib/negociacion/comparativo";
+import { clasificarSemaforo, etiquetaNivelSemaforo, amplitudSegunReferencia } from "@/lib/negociacion/comparativo";
 import { colorSemaforo, ESTADOS_SEMAFORO, FiltroEstadosSemaforo } from "@/components/comparativo/semaforo-ui";
+import { DashboardRiesgoTab } from "@/components/comparativo/dashboard-riesgo-tab";
 import {
   getOpcionesMunicipios,
   getComparativoPorMunicipio,
@@ -111,10 +112,12 @@ function FilaExpandible({
   fila,
   umbrales,
   referencia,
+  onAmplitudDobleClick,
 }: {
   fila: FilaComparativoCodigo;
   umbrales: UmbralesSemaforo;
   referencia: ReferenciaVariacion;
+  onAmplitudDobleClick: (fila: FilaComparativoCodigo) => void;
 }) {
   const [abierto, setAbierto] = useState(false);
   const valorReferencia = referencia === "promedio" ? fila.promedio : fila.mediana;
@@ -148,7 +151,22 @@ function FilaExpandible({
         <TableCell className="text-right">{formatearMoneda(fila.minimo)}</TableCell>
         <TableCell className="text-right">{formatearMoneda(fila.maximo)}</TableCell>
         <TableCell className="text-right">{formatearMoneda(valorReferencia)}</TableCell>
-        <TableCell className="text-right font-semibold">{formatearPorcentaje(fila.amplitudPct)}</TableCell>
+        {/* Sin decimales (pedido 2026-07-29) + doble clic abre un menú
+            emergente con el cálculo completo — el usuario reportó que la
+            fórmula no era clara desde solo mirar Mínimo/Máximo/Mediana en
+            pantalla (ver ModalDetalleAmplitud más abajo). `stopPropagation`
+            en ambos eventos para que ni el clic simple ni el doble clic
+            desplieguen también la fila (que reacciona a onClick). */}
+        <TableCell
+          className="cursor-pointer text-right font-semibold underline decoration-dotted underline-offset-4"
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            onAmplitudDobleClick(fila);
+          }}
+        >
+          {formatearPorcentaje(amplitudSegunReferencia(fila, referencia), 0)}
+        </TableCell>
       </TableRow>
       {abierto && (
         <TableRow className="border-l-4 border-l-primary bg-primary/5">
@@ -204,6 +222,109 @@ function FilaExpandible({
   );
 }
 
+/**
+ * Menú emergente con el cálculo completo de Amplitud — pedido por el usuario
+ * 2026-07-29 tras reportar que la fórmula no se podía verificar solo con lo
+ * visible en la tabla (el Promedio no se muestra cuando "Comparar contra" es
+ * Mediana, y viceversa). Se abre con doble clic sobre el valor de Amplitud
+ * (no con hover: el usuario pidió explícitamente un menú emergente, no un
+ * tooltip). Overlay propio en vez de un componente Dialog de terceros — no
+ * hay `@radix-ui/react-dialog` instalado en el proyecto y agregar una
+ * dependencia nueva arriesga el mismo problema que `recharts` (ver
+ * KnowledgeBase/09-Errores) para algo que un overlay simple resuelve igual.
+ */
+function ModalDetalleAmplitud({
+  fila,
+  referencia,
+  onClose,
+}: {
+  fila: FilaComparativoCodigo;
+  referencia: ReferenciaVariacion;
+  onClose: () => void;
+}) {
+  const etiquetaElegida = referencia === "promedio" ? "Promedio" : "Mediana";
+  const etiquetaOtra = referencia === "promedio" ? "Mediana" : "Promedio";
+  const valorReferencia = referencia === "promedio" ? fila.promedio : fila.mediana;
+  const amplitudElegida = amplitudSegunReferencia(fila, referencia);
+  const amplitudOtra = referencia === "promedio" ? fila.amplitudPctMediana : fila.amplitudPctPromedio;
+  const prestadoresOrdenados = [...fila.prestadores].sort((a, b) => a.valorFinal - b.valorFinal);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <Card className="max-h-[85vh] w-full max-w-lg overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+        <CardContent className="space-y-4 pt-6">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-medium text-muted-foreground">Cómo se calcula la Amplitud</p>
+              <p className="font-mono text-sm font-semibold">{fila.codigoTarifa}</p>
+              <p className="text-sm text-muted-foreground">{fila.descripcion}</p>
+              {fila.municipioNombre ? (
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {fila.municipioNombre} / {fila.departamentoNombre} · {fila.cantidadPrestadores} prestadores
+                </p>
+              ) : null}
+            </div>
+            <Button variant="outline" size="sm" onClick={onClose}>
+              Cerrar
+            </Button>
+          </div>
+
+          <div className="rounded-md border bg-muted/40 p-3 text-sm">
+            <p className="font-medium">Amplitud % = (Máximo − Mínimo) / {etiquetaElegida} × 100</p>
+            <p className="mt-1 text-muted-foreground">
+              Mide qué tan dispersos están los precios de este código entre los prestadores del municipio: compara el más caro contra el más
+              barato, en proporción {referencia === "promedio" ? "al promedio" : "a la mediana"} del grupo. No compara contra un prestador
+              puntual — cuanto más alto el número, más inconsistente está el precio negociado entre tus prestadores para este mismo código.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+            <div>
+              <span className="text-muted-foreground">Mínimo:</span> {formatearMoneda(fila.minimo)}
+            </div>
+            <div>
+              <span className="text-muted-foreground">Máximo:</span> {formatearMoneda(fila.maximo)}
+            </div>
+            <div>
+              <span className="text-muted-foreground">Promedio:</span> {formatearMoneda(fila.promedio)}
+            </div>
+            <div>
+              <span className="text-muted-foreground">Mediana:</span> {formatearMoneda(fila.mediana)}
+            </div>
+          </div>
+
+          <div className="rounded-md border p-3 text-sm">
+            <p className="font-mono text-xs text-muted-foreground">
+              ({formatearMoneda(fila.maximo)} − {formatearMoneda(fila.minimo)}) / {formatearMoneda(valorReferencia)} × 100
+            </p>
+            <p className="mt-1 text-2xl font-bold">{formatearPorcentaje(amplitudElegida, 0)}</p>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Calculado contra {etiquetaElegida.toLowerCase()} porque así está configurado "Comparar contra" en pantalla — contra{" "}
+              {etiquetaOtra.toLowerCase()} daría {formatearPorcentaje(amplitudOtra, 0)}.
+            </p>
+          </div>
+
+          <div>
+            <p className="mb-1 text-xs font-medium text-muted-foreground">Precios reales que sustentan el cálculo</p>
+            <div className="max-h-40 overflow-y-auto rounded-md border">
+              <table className="w-full text-xs">
+                <tbody>
+                  {prestadoresOrdenados.map((p) => (
+                    <tr key={`${p.ips}-${p.consecutivoContrato}`} className="border-b last:border-0">
+                      <td className="px-2 py-1">{p.razonSocial}</td>
+                      <td className="whitespace-nowrap px-2 py-1 text-right font-mono">{formatearMoneda(p.valorFinal)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 export function ComparativoClient() {
   const [tipo, setTipo] = useState<TipoComparativo>("servicios");
   const [umbrales, setUmbrales] = useState<UmbralesSemaforo>(UMBRALES_SEMAFORO_DEFECTO);
@@ -229,6 +350,10 @@ export function ComparativoClient() {
   const [municipioBusqueda, setMunicipioBusqueda] = useState<string>("");
   const [resultadoBusqueda, setResultadoBusqueda] = useState<FilaComparativoCodigo[] | null>(null);
   const [cargandoBusqueda, setCargandoBusqueda] = useState(false);
+
+  // Fila cuyo detalle de cálculo de Amplitud se muestra en el menú emergente
+  // (ModalDetalleAmplitud) — null = cerrado. Compartido por ambas pestañas.
+  const [amplitudDetalle, setAmplitudDetalle] = useState<FilaComparativoCodigo | null>(null);
 
   // Cargar municipios disponibles cada vez que cambia el tipo de tarifario.
   useEffect(() => {
@@ -314,7 +439,7 @@ export function ComparativoClient() {
     if (!codigoBusqueda.trim()) return;
     setCargandoBusqueda(true);
     try {
-      const res = await getComparativoPorCodigo(codigoBusqueda, tipo, municipioBusqueda || undefined);
+      const res = await getComparativoPorCodigo(codigoBusqueda, tipo, municipioBusqueda || undefined, referencia);
       setResultadoBusqueda(res);
     } finally {
       setCargandoBusqueda(false);
@@ -379,8 +504,13 @@ export function ComparativoClient() {
       <Tabs defaultValue="municipio">
         <TabsList>
           <TabsTrigger value="municipio">Comparativo por municipio</TabsTrigger>
+          <TabsTrigger value="riesgo">📊 Dashboard Analítico de Competitividad y Riesgo Contractual</TabsTrigger>
           <TabsTrigger value="codigo">Buscar código específico</TabsTrigger>
         </TabsList>
+
+        <TabsContent value="riesgo" className="space-y-3">
+          <DashboardRiesgoTab tipo={tipo} referencia={referencia} umbrales={umbrales} />
+        </TabsContent>
 
         <TabsContent value="municipio" className="space-y-3">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -486,7 +616,10 @@ export function ComparativoClient() {
                   <TableHead className="text-right">Mínimo</TableHead>
                   <TableHead className="text-right">Máximo</TableHead>
                   <TableHead className="text-right">{referencia === "promedio" ? "Promedio" : "Mediana"}</TableHead>
-                  <TableHead className="text-right">Amplitud</TableHead>
+                  <TableHead className="text-right">
+                    Amplitud
+                    <span className="block text-[10px] font-normal normal-case text-muted-foreground">doble clic = cómo se calcula</span>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -503,6 +636,7 @@ export function ComparativoClient() {
                       fila={{ ...fila, municipioNombre: "" }}
                       umbrales={umbrales}
                       referencia={referencia}
+                      onAmplitudDobleClick={setAmplitudDetalle}
                     />
                   ))
                 )}
@@ -598,7 +732,10 @@ export function ComparativoClient() {
                   <TableHead className="text-right">Mínimo</TableHead>
                   <TableHead className="text-right">Máximo</TableHead>
                   <TableHead className="text-right">{referencia === "promedio" ? "Promedio" : "Mediana"}</TableHead>
-                  <TableHead className="text-right">Amplitud</TableHead>
+                  <TableHead className="text-right">
+                    Amplitud
+                    <span className="block text-[10px] font-normal normal-case text-muted-foreground">doble clic = cómo se calcula</span>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -629,6 +766,7 @@ export function ComparativoClient() {
                       fila={fila}
                       umbrales={umbrales}
                       referencia={referencia}
+                      onAmplitudDobleClick={setAmplitudDetalle}
                     />
                   ))
                 )}
@@ -637,6 +775,10 @@ export function ComparativoClient() {
           </div>
         </TabsContent>
       </Tabs>
+
+      {amplitudDetalle ? (
+        <ModalDetalleAmplitud fila={amplitudDetalle} referencia={referencia} onClose={() => setAmplitudDetalle(null)} />
+      ) : null}
     </div>
   );
 }

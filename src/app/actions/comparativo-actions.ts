@@ -25,7 +25,7 @@
 
 import { pool } from "@/lib/db";
 import { resolverValorFinal } from "@/lib/negociacion/formato";
-import { calcularEstadisticas, calcularVariacionPct, dedupMejorPrecio, filtrarYRecortarPorEstados } from "@/lib/negociacion/comparativo";
+import { calcularEstadisticas, calcularVariacionPct, dedupMejorPrecio, filtrarYRecortarPorEstados, amplitudSegunReferencia } from "@/lib/negociacion/comparativo";
 import { CONTRATOS_EXCLUIDOS_MIGRACION } from "@/lib/negociacion/constantes";
 import { LIMITE_FILAS_EXPORTACION } from "@/lib/negociacion/exportar";
 import type {
@@ -125,7 +125,8 @@ function construirFilaComparativo(
     maximo: stats.maximo,
     promedio: stats.promedio,
     mediana: stats.mediana,
-    amplitudPct: stats.amplitudPct,
+    amplitudPctPromedio: stats.amplitudPctPromedio,
+    amplitudPctMediana: stats.amplitudPctMediana,
     prestadores: filas
       .map((f) => ({
         ips: f.ips,
@@ -294,7 +295,10 @@ export async function getComparativoPorMunicipio(
   const grupos = filtrarYRecortarPorEstados(gruposCrudos, params.referencia, params.umbrales, params.estadosFiltro);
 
   // Variabilidad más alta primero — es la vista más útil para negociación.
-  grupos.sort((a, b) => b.amplitudPct - a.amplitudPct);
+  // Corrección 2026-07-29: ordenar por la Amplitud que coincide con la
+  // referencia elegida en pantalla ("Comparar contra"), no siempre contra el
+  // promedio — mismo criterio que se usa para mostrarla en la tabla.
+  grupos.sort((a, b) => amplitudSegunReferencia(b, params.referencia) - amplitudSegunReferencia(a, params.referencia));
 
   const total = grupos.length;
   const offset = (page - 1) * pageSize;
@@ -329,7 +333,7 @@ export async function getComparativoMunicipioCompleto(
     busqueda
   );
   const grupos = filtrarYRecortarPorEstados(gruposCrudos, referencia, umbrales, estadosFiltro);
-  grupos.sort((a, b) => b.amplitudPct - a.amplitudPct);
+  grupos.sort((a, b) => amplitudSegunReferencia(b, referencia) - amplitudSegunReferencia(a, referencia));
   return { grupos, municipioNombre, departamentoNombre };
 }
 
@@ -354,7 +358,8 @@ export async function obtenerInfoMunicipio(municipioCodigo: string): Promise<{ m
 export async function getComparativoPorCodigo(
   codigoBusqueda: string,
   tipo: TipoComparativo,
-  municipioCodigo?: string
+  municipioCodigo?: string,
+  referencia: ReferenciaVariacion = "promedio"
 ): Promise<FilaComparativoCodigo[]> {
   const busqueda = codigoBusqueda.trim();
   if (!busqueda) return [];
@@ -436,6 +441,6 @@ export async function getComparativoPorCodigo(
     );
   }
 
-  resultado.sort((a, b) => b.amplitudPct - a.amplitudPct);
+  resultado.sort((a, b) => amplitudSegunReferencia(b, referencia) - amplitudSegunReferencia(a, referencia));
   return resultado.slice(0, LIMITE_GRUPOS_BUSQUEDA_CODIGO);
 }

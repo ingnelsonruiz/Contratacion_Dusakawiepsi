@@ -94,7 +94,12 @@ export interface FilaComparativoCodigo {
   maximo: number;
   promedio: number;
   mediana: number;
-  amplitudPct: number; // (máximo - mínimo) / promedio * 100 — variabilidad genuina del grupo
+  // (máximo - mínimo) / referencia * 100 — variabilidad genuina del grupo.
+  // Ambas variantes (2026-07-29): cuál se muestra/ordena depende de
+  // "Comparar contra" en la UI — ver amplitudSegunReferencia() en
+  // src/lib/negociacion/comparativo.ts.
+  amplitudPctPromedio: number;
+  amplitudPctMediana: number;
   prestadores: PrestadorValorComparativo[];
 }
 
