@@ -15,6 +15,7 @@
  */
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import Search from "lucide-react/icons/search";
 import FileSpreadsheet from "lucide-react/icons/file-spreadsheet";
 import FileDown from "lucide-react/icons/file-down";
@@ -24,6 +25,8 @@ import Info from "lucide-react/icons/info";
 import ChevronDown from "lucide-react/icons/chevron-down";
 import ChevronRight from "lucide-react/icons/chevron-right";
 import X from "lucide-react/icons/x";
+import Receipt from "lucide-react/icons/receipt";
+import Loader2 from "lucide-react/icons/loader-2";
 
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -33,15 +36,17 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
 import { Paginacion } from "@/components/tarifarios/paginacion";
 import { colorSemaforo } from "@/components/comparativo/semaforo-ui";
-import { formatearMoneda, formatearPorcentaje } from "@/lib/negociacion/formato";
+import { formatearMoneda, formatearPorcentaje, formatearFecha } from "@/lib/negociacion/formato";
 import { etiquetaNivelSemaforo } from "@/lib/negociacion/comparativo";
 import { etiquetaNivelRiesgo } from "@/lib/negociacion/dashboard-riesgo";
 import { getOpcionesPrestadoresRiesgo } from "@/app/actions/dashboard-riesgo-actions";
 import { getPerfilPrestador } from "@/app/actions/perfil-prestador-actions";
+import { getMovimientoRipsCodigo } from "@/app/actions/movimiento-rips-actions";
 import type { TipoComparativo, ReferenciaVariacion, UmbralesSemaforo, NivelSemaforo } from "@/types/comparativo";
 import { UMBRALES_SEMAFORO_DEFECTO } from "@/types/comparativo";
 import type { ResultadoPerfilPrestador, FilaCodigoPerfil } from "@/types/perfil-prestador";
 import type { FilaRankingRiesgo } from "@/types/dashboard-riesgo";
+import type { ResultadoMovimientoRips } from "@/types/movimiento-rips";
 
 const PAGE_SIZE = 100;
 
@@ -90,8 +95,22 @@ function InfoTooltip({ texto }: { texto: string }) {
 }
 
 /** Overlay genérico de doble clic — mismo patrón ya usado en dashboard-riesgo-tab.tsx (ModalInfo): sin librería de diálogo, position fixed + fondo oscuro + Card centrada. */
+/**
+ * Renderizada vía `createPortal` a `document.body` — CRÍTICO: esta modal se
+ * abre desde `FilaCodigoPerfilRow`, que vive dentro de un `<tbody>` (fila de
+ * la tabla de códigos). Sin portal, el `<div>` raíz de esta modal quedaría
+ * como hijo directo de `<tbody>` en el DOM (HTML inválido — `<tbody>` solo
+ * acepta `<tr>`), causando el error de hidratación de Next.js: *"In HTML,
+ * `<div>` cannot be a child of `<tbody>`"*. El portal saca el modal del árbol
+ * de la tabla por completo, además de evitar que quede recortado por el
+ * contenedor `overflow-y-auto` de la tabla.
+ */
 function ModalOverlay({ titulo, subtitulo, onClose, children }: { titulo: string; subtitulo?: string; onClose: () => void; children: ReactNode }) {
-  return (
+  const [montado, setMontado] = useState(false);
+  useEffect(() => setMontado(true), []);
+  if (!montado) return null;
+
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
       <Card className="max-h-[85vh] w-full max-w-4xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
         <CardContent className="flex max-h-[85vh] flex-col gap-3 pt-6">
@@ -107,7 +126,8 @@ function ModalOverlay({ titulo, subtitulo, onClose, children }: { titulo: string
           <div className="overflow-y-auto">{children}</div>
         </CardContent>
       </Card>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -268,6 +288,22 @@ export function PerfilPrestadorClient() {
     return resultado.codigos.filter((c) => c.nivel === filtroNivel);
   }, [resultado, filtroNivel]);
 
+  // Un prestador puede tener varios contratos vigentes a la vez (distintos
+  // municipios, o distintos períodos dentro del mismo tipo de tarifario) —
+  // pedido del usuario 2026-07-29: "necesito saber cuál es el número del
+  // contrato que se está analizando, los prestadores pueden tener varios
+  // número de contrato". Se deriva de los propios códigos ya traídos (sin
+  // consulta nueva), como la lista de contratos que realmente aportan datos
+  // a este análisis.
+  const contratosAnalizados = useMemo(() => {
+    if (!resultado) return [];
+    const set = new Set<string>();
+    for (const c of resultado.codigos) {
+      if (c.numeroContratoPrestador) set.add(c.numeroContratoPrestador);
+    }
+    return Array.from(set).sort();
+  }, [resultado]);
+
   function alternarNivel(nivel: NivelSemaforo) {
     setFiltroNivel((actual) => (actual === nivel ? "todos" : nivel));
     setPagina(1);
@@ -396,7 +432,7 @@ export function PerfilPrestadorClient() {
         ) : (
           <>
             {/* --- Resumen ejecutivo --- */}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <Card>
                 <CardContent className="pt-6">
                   <p className="flex items-center text-xs font-medium text-muted-foreground">
@@ -441,10 +477,34 @@ export function PerfilPrestadorClient() {
                   </p>
                 </CardContent>
               </Card>
+              <Card>
+                <CardContent className="pt-6">
+                  <p className="flex items-center text-xs font-medium text-muted-foreground">
+                    Contrato(s) analizado(s)
+                    <InfoTooltip texto="Números de contrato (visibles en ARYUWIS) de donde salen los valores comparados en esta pantalla. Un prestador puede tener varios contratos vigentes a la vez (por municipio o por período)." />
+                  </p>
+                  <p className="mt-1 text-xl font-bold">{contratosAnalizados.length}</p>
+                  <div className="mt-0.5 max-h-14 space-y-0.5 overflow-y-auto">
+                    {contratosAnalizados.map((c) => (
+                      <p key={c} className="truncate font-mono text-[11px] text-muted-foreground" title={c}>
+                        {c}
+                      </p>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
             </div>
 
             {/* --- Segmentadores por nivel — clic filtra la tabla de abajo --- */}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            {/* Pedido 2026-07-29: mostrar el total sin que el usuario tenga que sumar las 5 tarjetas a mano. */}
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <TarjetaKpi
+                etiqueta="Total analizado"
+                valor={resumen.totalApariciones.toLocaleString("es-CO")}
+                sub="Críticas + Alerta + OK + Favorables + Muy favorables"
+                onClick={() => setFiltroNivel("todos")}
+                activo={filtroNivel === "todos"}
+              />
               <TarjetaKpi
                 etiqueta="Críticas"
                 valor={resumen.cantidadCritico.toLocaleString("es-CO")}
@@ -524,7 +584,7 @@ export function PerfilPrestadorClient() {
                       </TableCell>
                     </TableRow>
                   ) : (
-                    codigosPagina.map((c) => <FilaCodigoPerfilRow key={`${c.codigoTarifa}__${c.municipioNombre}`} fila={c} />)
+                    codigosPagina.map((c) => <FilaCodigoPerfilRow key={`${c.codigoTarifa}__${c.municipioNombre}`} fila={c} tipo={tipo} />)
                   )}
                 </TableBody>
               </Table>
@@ -561,8 +621,31 @@ export function PerfilPrestadorClient() {
  * otros prestadores con los que se compara cada código". Mismo patrón que
  * FilaHistoricoExpandible en historico-prestador-client.tsx.
  */
-function FilaCodigoPerfilRow({ fila }: { fila: FilaCodigoPerfil }) {
+function FilaCodigoPerfilRow({ fila, tipo }: { fila: FilaCodigoPerfil; tipo: TipoComparativo }) {
   const [abierto, setAbierto] = useState(false);
+  // Movimientos RIPS por prestador — pedido del usuario 2026-07-29: "cuántos
+  // procedimientos de esos ha radicado cada prestador y su número de
+  // factura... para mirar movimientos de ese código". Bajo demanda (solo se
+  // consulta al hacer clic en el prestador específico, no para los 4 a la
+  // vez) porque la consulta de fondo (RIPS histórico completo) toma unos
+  // segundos — ver movimiento-rips-actions.ts.
+  const [movimientoIps, setMovimientoIps] = useState<number | null>(null);
+  const [movimientoRazonSocial, setMovimientoRazonSocial] = useState("");
+  const [movimientoResultado, setMovimientoResultado] = useState<ResultadoMovimientoRips | null>(null);
+  const [cargandoMovimiento, setCargandoMovimiento] = useState(false);
+
+  async function verMovimientos(ips: number, razonSocial: string) {
+    setMovimientoIps(ips);
+    setMovimientoRazonSocial(razonSocial);
+    setMovimientoResultado(null);
+    setCargandoMovimiento(true);
+    try {
+      const res = await getMovimientoRipsCodigo(ips, fila.codigoTarifa, tipo);
+      setMovimientoResultado(res);
+    } finally {
+      setCargandoMovimiento(false);
+    }
+  }
 
   return (
     <>
@@ -624,11 +707,87 @@ function FilaCodigoPerfilRow({ fila }: { fila: FilaCodigoPerfil }) {
                   <p className="text-muted-foreground">NIT {p.nit}</p>
                   <p className="mt-0.5 font-semibold">{formatearMoneda(p.valorFinal)}</p>
                   <p className="font-mono text-muted-foreground">Contrato: {p.numeroContrato}</p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="mt-1.5 h-7 w-full text-[11px]"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      verMovimientos(p.ips, p.razonSocial);
+                    }}
+                  >
+                    <Receipt className="h-3 w-3" /> Ver movimientos
+                  </Button>
                 </div>
               ))}
             </div>
           </TableCell>
         </TableRow>
+      )}
+
+      {movimientoIps !== null && (
+        <ModalOverlay
+          titulo={`Movimientos RIPS — ${movimientoRazonSocial}`}
+          subtitulo={`Código ${fila.codigoTarifa} · ${fila.descripcion}`}
+          onClose={() => setMovimientoIps(null)}
+        >
+          {cargandoMovimiento ? (
+            <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Consultando RIPS (puede tardar unos segundos)…
+            </div>
+          ) : movimientoResultado ? (
+            movimientoResultado.totalFacturas === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                Este prestador no ha radicado facturas RIPS con el código {fila.codigoTarifa} (histórico completo, sin límite de
+                fecha).
+              </p>
+            ) : (
+              <>
+                <div className="mb-3 grid grid-cols-3 gap-3 text-center">
+                  <div>
+                    <p className="text-xs text-muted-foreground">Total facturas</p>
+                    <p className="text-lg font-bold">{movimientoResultado.totalFacturas.toLocaleString("es-CO")}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Total unidades</p>
+                    <p className="text-lg font-bold">{movimientoResultado.totalCantidad.toLocaleString("es-CO")}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Total facturado</p>
+                    <p className="text-lg font-bold">{formatearMoneda(movimientoResultado.totalValor)}</p>
+                  </div>
+                </div>
+                {movimientoResultado.facturas.length < movimientoResultado.totalFacturas ? (
+                  <p className="mb-2 text-center text-[11px] text-muted-foreground">
+                    Mostrando las {movimientoResultado.facturas.length.toLocaleString("es-CO")} facturas más recientes de{" "}
+                    {movimientoResultado.totalFacturas.toLocaleString("es-CO")} en total (los totales de arriba sí incluyen todas).
+                  </p>
+                ) : null}
+                <Table>
+                  <TableHeader className="sticky top-0 z-10 bg-background">
+                    <TableRow>
+                      <TableHead>N° Factura</TableHead>
+                      <TableHead>Fecha</TableHead>
+                      <TableHead className="text-right">Unidades</TableHead>
+                      <TableHead className="text-right">Valor</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {movimientoResultado.facturas.map((f) => (
+                      <TableRow key={`${f.numeroFactura}__${f.fecha}`}>
+                        <TableCell className="font-mono text-xs">{f.numeroFactura}</TableCell>
+                        <TableCell className="text-xs">{formatearFecha(f.fecha)}</TableCell>
+                        <TableCell className="text-right">{f.cantidad.toLocaleString("es-CO")}</TableCell>
+                        <TableCell className="text-right">{formatearMoneda(f.valor)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </>
+            )
+          ) : null}
+        </ModalOverlay>
       )}
     </>
   );
