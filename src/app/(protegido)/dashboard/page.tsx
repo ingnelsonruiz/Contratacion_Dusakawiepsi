@@ -7,6 +7,7 @@ import Scale from "lucide-react/icons/scale";
 import History from "lucide-react/icons/history";
 import UserSearch from "lucide-react/icons/user-search";
 import Activity from "lucide-react/icons/activity";
+import Trophy from "lucide-react/icons/trophy";
 import TrendingDown from "lucide-react/icons/trending-down";
 import FlaskConical from "lucide-react/icons/flask-conical";
 import Globe from "lucide-react/icons/globe";
@@ -46,6 +47,13 @@ const MODULOS = [
     descripcion: "Consumo real facturado (RIPS) agregado por prestador, código y período.",
     estado: "Disponible",
     href: "/consumo-frecuencia",
+  },
+  {
+    icono: Trophy,
+    titulo: "Top Impacto Económico",
+    descripcion: "Ranking de los 100 códigos (CUPS/CUM/Insumos) de mayor valor radicado — en qué enfocarse en la próxima negociación.",
+    estado: "Disponible",
+    href: "/top-impacto",
   },
   {
     icono: TrendingDown,

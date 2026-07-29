@@ -5,7 +5,7 @@ tags: [backend, api]
 # API
 
 > [!warning] Estado actual
-> El proyecto tiene 5 **Route Handlers reales**: `GET /api/export/tarifario` (Módulo 1), `GET /api/export/comparativo` (Módulo 2), `GET /api/export/historico-prestador` (Módulo 3), `GET /api/export/consumo-frecuencia` (Módulo 4) y `GET /api/export/perfil-prestador` (Perfil Competitivo del Prestador), todos exportación binaria Excel/CSV. El resto de operaciones de lectura/escritura sigue pasando por **Server Actions** (ver [[Servicios]]), siguiendo la convención: Server Actions para todo lo que no sea un archivo binario, Route Handlers solo para descargas. Este documento describe tanto lo existente como el diseño planificado en `docs/ARQUITECTURA.md` §2.3.
+> El proyecto tiene 6 **Route Handlers reales**: `GET /api/export/tarifario` (Módulo 1), `GET /api/export/comparativo` (Módulo 2), `GET /api/export/historico-prestador` (Módulo 3), `GET /api/export/consumo-frecuencia` (Módulo 4), `GET /api/export/perfil-prestador` (Perfil Competitivo del Prestador) y `GET /api/export/top-impacto` (Análisis de Códigos de Mayor Impacto Económico), todos exportación binaria Excel/CSV. El resto de operaciones de lectura/escritura sigue pasando por **Server Actions** (ver [[Servicios]]), siguiendo la convención: Server Actions para todo lo que no sea un archivo binario, Route Handlers solo para descargas. Este documento describe tanto lo existente como el diseño planificado en `docs/ARQUITECTURA.md` §2.3.
 
 ## Por qué Server Actions y no solo API REST
 
@@ -62,6 +62,24 @@ El stack usa **Server Actions para mutaciones desde componentes** y reserva **Ro
 | `getPerfilPrestador(ips, tipo, referencia, umbrales)` | Perfil completo de UN prestador: resumen ejecutivo (score/ranking/costo potencial, reutilizando `construirDashboardRiesgo`), posición en el ranking global, y el detalle código por código (sin acotar) contra sus pares del mismo municipio |
 
 Reutiliza `construirGruposTodosMunicipios` y `getOpcionesPrestadoresRiesgo` (ambas exportadas de `dashboard-riesgo-actions.ts` para esta reutilización) — no duplica ninguna consulta SQL. Ver metodología completa en [[Contratación#Perfil Competitivo del Prestador — nueva tarjeta independiente del dashboard (2026-07-29)]].
+
+## `GET /api/export/top-impacto` ✅ Implementado
+
+- **Archivo**: `src/app/api/export/top-impacto/route.ts`.
+- **Query params**: `tipo` (`todos`|`servicios`|`medicamentos`|`insumos`, por defecto `todos`), `anio` (obligatorio en la práctica, por defecto el año actual), `ips`/`municipioCodigo`/`numeroContrato` (opcionales, combinables entre sí), `formato` (`xlsx`|`csv`).
+- **Implementación**: llama a `getTopImpacto(filtros)` (la misma Server Action que usa la UI) y exporta `resultado.top100` (ya acotado a 100 filas — a diferencia de los demás exports del proyecto, aquí SÍ se acota porque el propio pedido del usuario es "los 100 códigos", no el universo completo). 2 hojas en Excel — "Parámetros" y "Top 100".
+- Ver metodología completa (incluida la verificación de rendimiento con `EXPLAIN ANALYZE` antes de construir) en [[Contratación#Nuevo módulo: Análisis de Códigos de Mayor Impacto Económico (2026-07-29)]].
+
+## Server Actions de "Análisis de Códigos de Mayor Impacto Económico"
+
+- **Archivo**: `src/app/actions/top-impacto-actions.ts`. Solo lectura.
+
+| Server Action | Propósito |
+|---|---|
+| `getOpcionesFiltrosImpacto()` | Opciones para los 4 filtros: prestadores/municipios/contratos vigentes hoy (mismo criterio del resto del proyecto) + años generados de forma fija (2022–actual, sin consultar la BD) |
+| `getTopImpacto(filtros)` | Ranking Top 100 EPS-completa por valor radicado (procedimientos+medicamentos+insumos o uno solo, según `tipo`), con KPIs y Top 20 por código/prestador/municipio para los gráficos |
+
+No reutiliza Server Actions de otros módulos (alcance distinto: EPS-completa vs. un prestador puntual) pero SÍ reutiliza el mismo patrón de rendimiento (`rips_af` como filtro previo + `= ANY(ARRAY(subquery))` sobre las tablas RIPS grandes) ya validado en Módulo 4 y en "Movimientos RIPS". Ver metodología completa en [[Contratación#Nuevo módulo: Análisis de Códigos de Mayor Impacto Económico (2026-07-29)]].
 
 ## Endpoints planificados (aún no implementados)
 

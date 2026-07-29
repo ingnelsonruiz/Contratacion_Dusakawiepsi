@@ -106,7 +106,19 @@ async function executeQuery(sql: string, params: any[] = [], source?: string): P
         error?.message?.includes("network") ||
         error?.message?.includes("503") ||
         error?.message?.includes("504") ||
-        error?.message?.includes("cold start");
+        error?.message?.includes("cold start") ||
+        // "TypeError: terminated" (undici) y variantes de socket cerrado a
+        // mitad de respuesta — visto 2026-07-29 con consultas pesadas del
+        // módulo "Top Impacto Económico" (varias consultas de varios
+        // segundos cada una contra el proxy): el proxy corta la conexión
+        // antes de terminar de responder en vez de devolver un error HTTP
+        // limpio. No es un error de sintaxis SQL ni de datos — reintentar
+        // tiene sentido igual que un cold start.
+        error?.message?.includes("terminated") ||
+        error?.message?.includes("socket") ||
+        error?.message?.includes("ECONNRESET") ||
+        error?.message?.includes("other side closed") ||
+        error?.code === "UND_ERR_SOCKET";
       if (attempt < PROXY_MAX_RETRIES && isRetryable) {
         console.warn(`[db] Proxy no responde (intento ${attempt}/${PROXY_MAX_RETRIES}). Reintentando en ${PROXY_RETRY_DELAY_MS / 1000}s...`);
         await new Promise((r) => setTimeout(r, PROXY_RETRY_DELAY_MS));

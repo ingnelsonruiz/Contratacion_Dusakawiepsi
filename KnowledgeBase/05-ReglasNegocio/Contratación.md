@@ -436,6 +436,90 @@ El rango resultante se pasa a las 3 funciones `obtenerMovimiento*` como parámet
 
 Se probaron directamente contra la BD real (solo lectura) las 4 consultas de opciones que alimentan la pantalla (municipios, tipo de contrato, nivel de complejidad, prestadores) — todas devuelven filas correctamente. El caso reportado inicialmente por el usuario ("no me muestra municipios para cargar el dashboard") no era un bug: el dropdown se veía vacío porque el componente aún estaba en el estado de carga inicial (la pantalla "Calculando dashboard…" sin indicador de progreso hacía parecer que estaba trabado) — resuelto agregando la barra de progreso simulada (ver sección del Dashboard de Riesgo, "Ajuste de seguimiento — barra de progreso").
 
+## Nuevo módulo: Análisis de Códigos de Mayor Impacto Económico (2026-07-29)
+
+> Componentes: `src/components/top-impacto/top-impacto-client.tsx`. Página: `/top-impacto`.
+> Server Actions: `src/app/actions/top-impacto-actions.ts` (`getOpcionesFiltrosImpacto`, `getTopImpacto`).
+> Tipos: `src/types/top-impacto.ts`. Helpers puros: `src/lib/negociacion/top-impacto.ts`.
+> Export: `src/app/api/export/top-impacto/route.ts`.
+
+### Qué es
+Ranking de los 100 procedimientos (CUPS), medicamentos (CUM) e insumos que representan el **mayor valor económico radicado para la EPS completa** (todos los prestadores a la vez), con KPIs, filtros y 3 gráficos de barras — para que Contratación sepa en qué códigos enfocarse en la próxima negociación. A diferencia de "Perfil Competitivo del Prestador" (un prestador contra sus pares del mismo municipio) y de "Movimientos RIPS" (un código+prestador puntual), aquí el alcance es **EPS-completa**: todos los prestadores, un año a la vez.
+
+### Verificación de viabilidad ANTES de construir (`EXPLAIN ANALYZE` contra la BD real)
+Antes de escribir código se verificó que una agregación `GROUP BY` código para **toda la EPS en un año completo** sobre las 3 tablas RIPS grandes (`rips_ap` 171M filas, `rips_am` 78M, `rips_at` 57M — ninguna con índice por fecha ni por prestador) fuera viable dentro del timeout de 90s del proxy:
+
+- Filtrar `rips_af` (10,2M filas, la tabla RIPS más chica) por año → `Parallel Seq Scan`, ~1.8s, ~231K facturas para 2026.
+- `rips_ap` agregado por código con `consecutivo_rips = ANY(ARRAY(subquery))` → `Index Scan` sobre `rips_ap_idx_rips`, **~2.8s** para el año completo, EPS-completa.
+- `rips_am` agregado por código (con `COUNT(DISTINCT codigo_prestador)`, fuerza `GroupAggregate` + `Sort` en vez de `HashAggregate`) → **~4.6s**.
+- `rips_at` agregado por código → **~6.1s**.
+- Agregación por municipio (JOIN con `ct_ips` vía `ix_ct_ips_codigo_prestador`, índice único — `Memoize` sobre el join) → **~3.1s**, mismo orden de magnitud.
+
+Los 4 tiempos están muy por debajo del timeout de 90s, incluso corriendo las 3 tablas en paralelo (`Promise.all`) para una sola consulta. Esto confirmó que el módulo podía construirse como consulta en vivo (sin tabla resumen precalculada ni job asíncrono).
+
+### Diseño de las 3 consultas — UNION ALL en vez de un loop por tipo
+Para no multiplicar los viajes a la BD (hasta 9 si se repitiera "por código/por prestador/por municipio" × 3 tipos), cada una de las 3 consultas principales arma **un solo SQL** con `UNION ALL` de las tablas RIPS necesarias (1 a 3, según el filtro "Tipo" — `servicios`/`medicamentos`/`insumos`/`todos`), y agrega en una sola pasada:
+
+1. **`obtenerPorCodigo`**: `GROUP BY código, descripción` (con `LEFT JOIN` al catálogo correspondiente — `tb_cup`/`tb_medicamento`/`tb_insumo`, todos con `codigo_interno` + `descripcion`), sin `LIMIT` en SQL — se traen TODOS los códigos distintos (unos ~18.000 combinando los 3 tipos para un año) para que los KPIs (valor total, total registros, total códigos diferentes) sean exactos; el recorte a Top 100 se hace en Node (`.slice(0, 100)`) después de `ORDER BY valor DESC` en SQL.
+2. **`obtenerPorPrestador`**: mismo filtro, pero agregando por `ips.ips` vía `JOIN ct_ips` — Top 20 para el gráfico de barras de prestadores.
+3. **`obtenerPorMunicipio`**: igual, agregando por `ips.municipio` vía `JOIN ct_ips` + `LEFT JOIN tb_municipio` — Top 20 para el gráfico de municipios.
+
+El fragmento `ARRAY(SELECT consecutivo_rips FROM rips_af WHERE ...)` (año obligatorio + prestador/municipio/contrato opcionales y combinables) se arma una sola vez por request (`construirFragmentoFacturas`) y se repite textualmente en cada rama del `UNION ALL` — Postgres lo resuelve por separado en cada rama, pero mantiene el patrón ya validado `= ANY(ARRAY(subquery))` (nunca `IN (subquery)`, ver sección de "Perfil Competitivo del Prestador" sobre por qué no son equivalentes en la práctica para el planificador de esta BD).
+
+### Filtros combinables (prestador + municipio + contrato + año + tipo)
+Los 3 filtros opcionales de prestador/municipio/contrato se resuelven como condiciones adicionales dentro del mismo fragmento `ARRAY(...)`, cada uno con su propio `$n`:
+- **Prestador**: se resuelve primero `ips → codigo_prestador` (una consulta pequeña a `ct_ips`) y se agrega `AND codigo_prestador = $n`.
+- **Municipio**: `AND codigo_prestador = ANY(ARRAY(SELECT codigo_prestador FROM ct_ips WHERE municipio = $n))`.
+- **Contrato**: `AND codigo_prestador = ANY(ARRAY(SELECT ci.codigo_prestador FROM ct_ips_contrato c JOIN ct_ips ci ON ci.ips = c.ips WHERE c.numero_contrato = $n))`.
+
+Los 3 son combinables entre sí (AND) porque cada uno es una condición independiente sobre el mismo `codigo_prestador`.
+
+### Opciones de filtro (`getOpcionesFiltrosImpacto`)
+- Prestadores y municipios: mismo criterio de "contrato vigente hoy" ya usado en el resto del proyecto (`sw_activo=1 AND fecha_anula IS NULL AND numero_contrato != ALL(CONTRATOS_EXCLUIDOS_MIGRACION) AND fecha_inicio <= CURRENT_DATE AND fecha_terminacion >= CURRENT_DATE`).
+- Contratos: `numero_contrato` distintos de esos mismos contratos vigentes.
+- **Años**: generado de forma FIJA en Node (`PRIMER_ANIO_CON_DATOS = 2022` hasta el año actual), sin consultar la BD — se verificó la distribución real (`EXTRACT(YEAR FROM fecha_servicio_rips)`) el 2026-07-29: 2022-2026 concentra el 99,9% del volumen real, y no vale la pena pagar una consulta adicional ni arriesgar que aparezcan años corruptos (`rips_af` tiene registros con año 7313 documentados en otras tablas RIPS — ver CLAUDE.md §6).
+
+### Sin gráfico de terceros — mismo patrón ya establecido
+Los 3 gráficos de barras (Top 20 códigos / prestadores / municipios) se construyen con HTML/CSS puro (`<div>` con `width: %` proporcional al máximo del set) — **no** se reintentó instalar `recharts` (ver KnowledgeBase/09-Errores §12: la instalación queda corrupta en este sandbox mientras el usuario tiene `npm run dev` corriendo). Mismo criterio que el gráfico de línea SVG de "Histórico del Prestador".
+
+### Corrección `TypeError: terminated` (mismo día, tras primera prueba en pantalla)
+
+Al probar el módulo en pantalla apareció `Unhandled Runtime Error — TypeError: terminated` (error de `fetch`/undici: la conexión se cierra a mitad de la respuesta, no un error HTTP limpio). Causa más probable: `getTopImpacto` lanzaba las 3 consultas principales (`obtenerPorCodigo`/`obtenerPorPrestador`/`obtenerPorMunicipio`) con `Promise.all`, es decir 3 consultas pesadas EPS-completa (~3-15s cada una, con varianza real observada bajo carga) **a la vez** contra el mismo proxy (una única instancia Node con su propio pool de conexiones a Postgres) — la concurrencia parece haber saturado el proxy y provocado que cerrara la conexión antes de terminar de responder.
+
+**Fix aplicado**:
+1. **Ejecución secuencial** en vez de `Promise.all` para las 3 consultas de `getTopImpacto` — más lento en total (las 3 consultas suman en vez de solaparse) pero mucho más confiable; la barra de progreso ya comunica que es una consulta pesada, así que el costo en UX es aceptable frente al riesgo de fallo total.
+2. **CTE materializada** (`WITH facturas_periodo AS MATERIALIZED (...)`) para el fragmento de `rips_af` — antes se repetía como texto crudo en cada rama del `UNION ALL` (hasta 3 Seq Scans de `rips_af` por consulta con `tipo=todos`); con `MATERIALIZED` Postgres la resuelve una sola vez por consulta y las ramas siguientes reutilizan el resultado ya calculado (`CTE Scan`, <15ms).
+3. **`db.ts` ampliado** (afecta a TODO el proyecto, no solo este módulo): se agregaron `"terminated"`, `"socket"`, `"ECONNRESET"`, `"other side closed"` y el código `UND_ERR_SOCKET` a la lista de errores reintentables en `executeQuery` — antes `TypeError: terminated` no calzaba con ningún patrón (`fetch`/`network`/`503`/`504`/`cold start`) y fallaba al primer intento sin reintentar.
+
+### Corrección de subestimación real — verificada contra un estudio factura-por-factura del usuario (2026-07-29)
+
+El usuario aportó un Excel propio (`EV-20001-2026-1_Diagnostico_Integral_v3.xlsx`, estudio verificado factura por factura del contrato EV-20001-2026-1 / CLINICA MEDICOS S.A., NIT 824001041) con **"Valor Real Radicado" = $13.363.969.239** (metodología: suma AP+AC+AM+AT de 915 facturas activas). El módulo, sin filtro de prestador, mostraba a CLINICA MEDICOS en la posición #12 de "Top 20 prestadores por valor radicado" con solo **$4.586.280.134** — una diferencia de ~$8.780 millones. Se investigó a fondo contra la BD real (no se asumió nada) y se encontraron **2 causas reales, ambas corregidas**:
+
+**Causa 1 — Faltaba `rips_ac` (Consultas) por completo.** El módulo solo sumaba AP+AM+AT; el "Valor Real Radicado" correcto de cualquier factura es AP+AC+AM+AT (mismo hallazgo ya documentado por el usuario en su nota de auditoría de este mismo contrato). Se agregó **"Consultas" como 4º tipo** (`rips_ac`, columna `codigo_consulta`/`valor_consulta`) — comparte catálogo `tb_cup` con "Servicios" (verificado: `codigo_consulta` sí resuelve descripción ahí, ej. "890602 → CUIDADO (MANEJO) INTRAHOSPITALARIO POR MEDICINA ESPECIALIZADA") pero es una tabla RIPS distinta, se mantiene como tipo separado en el selector y en `TABLA_TIPO`.
+
+**Causa 2 — códigos de prestador "huérfanos" (más grave, afecta a toda la EPS, no solo a este caso).** Verificado que el `codigo_prestador` real dentro de las líneas de detalle (`rips_ap`/`rips_ac`/`rips_am`/`rips_at`) de las MISMAS facturas de este contrato aparece bajo **3 códigos distintos**: `200010053001` (registrado en `ct_ips`, $1.725M en AP), `200010053003` (NO existe como fila en `ct_ips`, $2.770M en AP — MÁS que el "001") y `200010053005` ($64.5K). `obtenerPorPrestador`/`obtenerPorMunicipio` usaban `JOIN` (INNER) contra `ct_ips` por `codigo_prestador` — con INNER JOIN, el 62% del valor de este prestador (todo lo de "003"/"005") desaparecía en silencio del ranking, sin ningún indicio de que faltaba. Se verificó que **no es un caso aislado**: para `rips_ap` solo, año 2026, EPS completa, **$4.651.600.354 de $58.560.654.810 (7,9%)** del valor total tiene un `codigo_prestador` sin fila en `ct_ips` — dinero real invisible en "Top 20 prestadores"/"Top 20 municipios" para cualquier prestador con sedes/códigos de habilitación no registrados como fila propia en `ct_ips`.
+
+**Fix aplicado** (`obtenerPorPrestador`/`obtenerPorMunicipio` en `top-impacto-actions.ts`): `LEFT JOIN` en vez de `JOIN`. En `obtenerPorPrestador` se agrupa también por `t.codigo_prestador` (seguro: `ix_ct_ips_codigo_prestador` es único, así que para un código SÍ registrado esto no cambia el resultado, solo aísla los códigos sin match en su propia fila, etiquetada `"Código no registrado: <codigo>"`, en vez de fusionarlos entre sí o perderlos). En `obtenerPorMunicipio` NO se puede aplicar el mismo truco directo (varios prestadores distintos comparten un mismo municipio, agrupar por `t.codigo_prestador` ahí partiría en pedazos la suma real de una ciudad) — se arma en su lugar una `clave` intermedia en una subconsulta (`COALESCE(ips.municipio, 'SIN:' || t.codigo_prestador)`) que preserva la agregación normal por municipio real y aísla cada código huérfano en su propio bucket ("Sin identificar (código ...)").
+
+**Verificación tras el fix** (contra la BD real, prestador=CLINICA MEDICOS, año=2026, tipo=todos): AP+AC+AM+AT = **$13.026.527.657** — a ~2,5% del $13.363.969.239 del estudio del usuario (la diferencia restante es metodológica, no un bug: el módulo agrega por PRESTADOR+AÑO completo, el estudio del usuario agrega por UN contrato específico (`consecutivo_contrato`) — un prestador con varios contratos activos en el año tendrá un total ligeramente distinto según cuál de los 2 criterios de alcance se use; ver pendiente abajo).
+
+**Pendiente/limitación conocida — filtro "Contrato" no acota por `consecutivo_contrato`.** El filtro de contrato del módulo (`numeroContrato`) restringe qué `codigo_prestador` se incluyen (los que tengan ESE número de contrato vigente), pero luego suma TODA la actividad RIPS de ese prestador en el año, no solo las facturas específicamente ligadas a ese `consecutivo_contrato`. Para una reconciliación exacta contrato-por-contrato (como el estudio del usuario), la forma correcta es filtrar `rips_af.consecutivo_contrato = $1` directamente — no implementado aquí porque el alcance de este módulo es deliberadamente EPS-completa/por-prestador, no por-contrato-individual; si se necesita esa granularidad exacta, usar el patrón SQL documentado por el usuario (`WHERE af.consecutivo_contrato = $1 AND af.fecha_anula IS NULL AND af.sw_vigencia_actual = 1`) en una consulta dedicada.
+
+**Nota estructural para TI/ARYUWIS** (no es un bug de este módulo, es un hallazgo de calidad de dato): valdría la pena que el equipo dueño de ARYUWIS registre las sedes/códigos de habilitación adicionales de un mismo prestador (ej. "200010053003") como filas de `ct_ips` o con algún campo de "prestador padre", para que CUALQUIER análisis agregado por prestador (no solo este módulo) dejen de perder ese ~8% de valor en silencio.
+
+#### Mejora posterior (mismo día): usar el prestador de la FACTURA, no el de la línea de detalle
+
+El fix anterior (LEFT JOIN + bucket "Código no registrado: X") era honesto pero dejaba el valor de un mismo prestador **partido en varias filas** (ej. "CLINICA MEDICOS S.A." por un lado, "Código no registrado: 200010053003" por otro) — molesto para leer un ranking. Se investigó una alternativa: en vez de atribuir cada línea de detalle a SU PROPIO `codigo_prestador` (el de la sede específica, no siempre registrado en `ct_ips`), atribuirla al `codigo_prestador` **de la factura que la contiene** (`rips_af.codigo_prestador`, resuelto vía `consecutivo_rips`) — el mismo campo que usa el resto del proyecto para identificar "de qué prestador es esto".
+
+**Verificado que es mucho más confiable**: de 329 `codigo_prestador` distintos en `rips_af` (año 2026, EPS completa), solo **2** no tienen fila en `ct_ips` — contra los cientos que aparecen sin match a nivel de línea de detalle. Para el caso de prueba (Clínica Médicos), las 920 facturas del contrato tienen el mismo `codigo_prestador` = "200010053001" en el 100% de los casos, aunque sus líneas internas usen "001"/"003"/"005".
+
+**Cuidado de rendimiento**: agregar un `JOIN facturas_periodo fp ON fp.consecutivo_rips = <alias>.consecutivo_rips` PARA REEMPLAZAR el filtro `WHERE consecutivo_rips = ANY(...)` (en vez de sumarlo) hace que el planificador de Postgres pierda el `Index Scan` y en su lugar escanee `rips_ap` COMPLETA (177M filas) para poder hacer el `Merge Join` — verificado con `EXPLAIN ANALYZE`: **50 segundos**, inaceptable. Manteniendo AMBOS —el `JOIN` (para obtener `fp.codigo_prestador`) Y el `WHERE consecutivo_rips = ANY(...)` (para forzar el `Index Scan` que reduce el conjunto ANTES del join)— el plan vuelve a ser rápido: **~4-7s**, con `Index Scan` + `Merge Join` contra la CTE ya materializada (chica, ~230K filas). Aplicado en `construirJoinFactura()`, usado por `obtenerPorCodigo` (para `COUNT(DISTINCT fp.codigo_prestador)`, antes contaba sedes como prestadores distintos) y `construirUnionCrudo` (base de `obtenerPorPrestador`/`obtenerPorMunicipio`).
+
+**Resultado verificado**: con este cambio, la consulta "por prestador" para Clínica Médicos ya NO se parte en 3 filas — todo el valor de AP ($4.443M en la prueba) aparece consolidado en una sola fila "CLINICA MEDICOS S.A.", como debe ser. El bucket "Código no registrado: X" sigue existiendo como red de seguridad (para los ~2 códigos de `rips_af` EPS-completa que de verdad no tienen fila en `ct_ips`), pero ya no aparece para el caso común de sedes múltiples de un mismo prestador.
+
+### Tabla Top 100 — ordenable, paginada de a 25
+A diferencia de otras tablas del proyecto (paginadas de a 100), aquí se usa `PAGE_SIZE = 25` porque el set completo ya está acotado a 100 filas (no tiene sentido una página de 100 sobre un total de 100). Las columnas Cantidad/Valor total/Valor promedio/Prestadores/% del total son clicables para ordenar asc/desc (`ArrowDownUp`) — pedido implícito del usuario ("permitiendo ordenar... la información fácilmente"), resuelto 100% en cliente (`Array.sort` sobre las 100 filas ya traídas, sin nueva consulta).
+
 ## Ver también
 - [[Validaciones]]
 - [[Arquitectura General]]
