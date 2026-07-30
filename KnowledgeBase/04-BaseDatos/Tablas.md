@@ -169,6 +169,8 @@ Verificado con datos reales (2026-07-28): Valledupar (`20001`, departamento Cesa
 >
 > **Rendimiento verificado con `EXPLAIN ANALYZE`**: la consulta más pesada afectada (`rips_at`, ~60M filas, año 2026 completo, SIN filtro de prestador) corrió en 4,78s con el fix — dentro del mismo rango ya aceptado para este módulo (3-10s), conservando el `Index Scan` sobre `rips_at_idx_rips` que ya se documentó como crítico.
 >
+> **Verificación post-deploy (2026-07-30)**: con el fix ya en producción, se repitió la consulta EPS-completa (tipo "Todos", año 2026, sin filtros) directamente contra la BD real y los 4 KPIs de la pantalla coincidieron exactos: Valor total radicado $162.194.615.413, Total de registros radicados 4.314.174, Total de códigos diferentes 18.680, Código de mayor impacto `129M02` $4.993.912.409. También se verificó que el Top 20 de prestadores mostrado coincide al peso con el cálculo directo, y que los 20 prestadores actualmente en ese ranking tienen un factor de duplicación de facturas de apenas 1.00x-1.03x (es decir, el bug los afectaba mínimamente) — MOVILIDAD VITAL SAS (factor 6,56x) salió del Top 20 tras la corrección, como se esperaba.
+>
 > **Pendiente/fuera de alcance**: esta es una corrección a nivel de consulta (capa de lectura), no del dato de origen — las copias duplicadas siguen existiendo físicamente en `rips_af`/`rips_ap`/`rips_ac`/`rips_am`/`rips_at`. Valdría la pena que TI/ARYUWIS investigue por qué el proceso de carga de RIPS reinserta lotes completos sin limpiar/reemplazar las cargas anteriores del mismo prestador — un fix en el origen evitaría que la tabla siga creciendo con copias basura y que cualquier consulta futura (de este proyecto o de otro) tenga que recordar aplicar esta deduplicación.
 
 ## Ver también
