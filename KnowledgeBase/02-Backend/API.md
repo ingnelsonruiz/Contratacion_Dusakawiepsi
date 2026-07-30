@@ -41,10 +41,10 @@ El stack usa **Server Actions para mutaciones desde componentes** y reserva **Ro
 ## `GET /api/export/consumo-frecuencia` ✅ Implementado
 
 - **Archivo**: `src/app/api/export/consumo-frecuencia/route.ts`.
-- **Query params**: `codigoPrestador` (obligatorio, el `codigo_prestador` de `ct_ips`), `mes`/`anio` (obligatorios, un mes específico), `tipo` (`servicios`|`medicamentos`|`insumos`, opcional), `formato` (`xlsx`|`csv`).
-- **Implementación**: llama a `getConsumoPrestador(codigoPrestador, mes, anio)` (`src/app/actions/consumo-frecuencia-actions.ts`), que filtra `rips_af` por prestador+mes (Seq Scan de ~6-8s, tabla más pequeña de las RIPS) y desde ahí cruza por `consecutivo_rips` (indexado) contra `rips_ap`/`rips_am`/`rips_at` — ver detalle completo y hallazgo de rendimiento en [[Contratación#Reglas implementadas — Módulo 4 (Consumo y Frecuencia) ✅ MVP]].
+- **Query params**: `codigoPrestador` (obligatorio, el `codigo_prestador` de `ct_ips`), `fechaInicio`/`fechaFin` (obligatorios, ISO `YYYY-MM-DD`, ambos extremos inclusive — reemplazó `mes`/`anio` el 2026-07-30), `tipo` (`servicios`|`medicamentos`|`insumos`, opcional), `formato` (`xlsx`|`csv`).
+- **Implementación**: valida el rango con `validarRangoConsumo()` (`src/lib/negociacion/consumo-frecuencia.ts`, 400 si falla) y llama a `getConsumoPrestador(codigoPrestador, fechaInicio, fechaFin)` (`src/app/actions/consumo-frecuencia-actions.ts`), que filtra `rips_af` por prestador+rango (Seq Scan de costo ~constante independiente del ancho del rango, tabla más pequeña de las RIPS) y desde ahí cruza por `consecutivo_rips` (indexado) contra `rips_ap`/`rips_am`/`rips_at` — ver detalle completo y hallazgo de rendimiento en [[Contratación#Reglas implementadas — Módulo 4 (Consumo y Frecuencia) ✅ MVP]].
 - **Excel**: 2 hojas — "Parámetros" y "Consumo por código".
-- Por diseño, **no acepta rango de fechas abierto** — solo un mes a la vez, para no arriesgar timeout del proxy sobre tablas de cientos de millones de filas sin índice de fecha.
+- Por diseño, el rango tiene un **tope de seguridad de `MAX_DIAS_RANGO_CONSUMO` = 92 días (~3 meses)** — corregido 2026-07-30 (antes era exactamente "un mes, sin excepción"; se amplió a un rango libre acotado tras pedido del usuario, ver [[Contratación#Corrección 2026-07-30 — selector de mes único reemplazado por rango de fechas día-a-día, con tope de seguridad]]) — para no arriesgar timeout del proxy sobre tablas de cientos de millones de filas sin índice de fecha.
 
 ## `GET /api/export/perfil-prestador` ✅ Implementado
 
@@ -66,7 +66,7 @@ Reutiliza `construirGruposTodosMunicipios` y `getOpcionesPrestadoresRiesgo` (amb
 ## `GET /api/export/top-impacto` ✅ Implementado
 
 - **Archivo**: `src/app/api/export/top-impacto/route.ts`.
-- **Query params**: `tipo` (`todos`|`servicios`|`medicamentos`|`insumos`, por defecto `todos`), `anio` (obligatorio en la práctica, por defecto el año actual), `ips`/`municipioCodigo`/`numeroContrato` (opcionales, combinables entre sí), `formato` (`xlsx`|`csv`).
+- **Query params**: `tipo` (`todos`|`servicios`|`medicamentos`|`insumos`, por defecto `todos`), `anio` (obligatorio en la práctica, por defecto el año actual), `ips`/`municipioCodigo`/`numerosContrato` (opcionales, combinables entre sí — `numerosContrato` es una lista separada por comas desde 2026-07-30, reemplazó al `numeroContrato` único), `formato` (`xlsx`|`csv`).
 - **Implementación**: llama a `getTopImpacto(filtros)` (la misma Server Action que usa la UI) y exporta `resultado.top100` (ya acotado a 100 filas — a diferencia de los demás exports del proyecto, aquí SÍ se acota porque el propio pedido del usuario es "los 100 códigos", no el universo completo). 2 hojas en Excel — "Parámetros" y "Top 100".
 - Ver metodología completa (incluida la verificación de rendimiento con `EXPLAIN ANALYZE` antes de construir) en [[Contratación#Nuevo módulo: Análisis de Códigos de Mayor Impacto Económico (2026-07-29)]].
 
@@ -76,8 +76,10 @@ Reutiliza `construirGruposTodosMunicipios` y `getOpcionesPrestadoresRiesgo` (amb
 
 | Server Action | Propósito |
 |---|---|
-| `getOpcionesFiltrosImpacto()` | Opciones para los 4 filtros: prestadores/municipios/contratos vigentes hoy (mismo criterio del resto del proyecto) + años generados de forma fija (2022–actual, sin consultar la BD) |
-| `getTopImpacto(filtros)` | Ranking Top 100 EPS-completa por valor radicado (procedimientos+medicamentos+insumos o uno solo, según `tipo`), con KPIs y Top 20 por código/prestador/municipio para los gráficos |
+| `getOpcionesFiltrosImpacto()` | Opciones para los 4 filtros EPS-completa: prestadores/municipios/contratos vigentes hoy (mismo criterio del resto del proyecto) + años generados de forma fija (2022–actual, sin consultar la BD) |
+| `getContratosPrestador(ips)` | Agregado 2026-07-30: contratos vigentes de UN prestador puntual con su `municipio_administracion` ya resuelto — alimenta el selector en cascada Prestador→Contrato(s)→Municipio de la UI (ver [[Contratación#Selector en cascada Prestador → Contrato(s) → Municipio (2026-07-30)]]) |
+| `getTopImpacto(filtros)` | Ranking Top 100 EPS-completa por valor radicado (procedimientos+medicamentos+insumos o uno solo, según `tipo`), con KPIs y Top 20 por código/prestador/municipio para los gráficos. También reutilizada tal cual para el Nivel 2 del drill-down (ver abajo), pasando `filtros.ips` = el prestador de la barra elegida |
+| `getFacturasCodigoImpacto(filtros, tipo, codigo)` | Agregado 2026-07-30: Nivel 3 del drill-down "de lo general a lo particular" — detalle factura por factura de un código para un prestador puntual, acotado por AÑO (no por vigencia de contrato, a diferencia de `getMovimientoRipsCodigo` de "Movimientos RIPS") y con soporte para "consultas" (que ese otro módulo no tiene). Requiere `filtros.ips`. Deduplica facturas re-radicadas en varios lotes (`facturas_canonicas`, ver [[Tablas#`rips_af` — una misma factura puede aparecer duplicada en varios lotes (`consecutivo_rips`) distintos]]). Ver [[Contratación#Drill-down "de lo general a lo particular" en Top 20 prestadores (2026-07-30)]] |
 
 No reutiliza Server Actions de otros módulos (alcance distinto: EPS-completa vs. un prestador puntual) pero SÍ reutiliza el mismo patrón de rendimiento (`rips_af` como filtro previo + `= ANY(ARRAY(subquery))` sobre las tablas RIPS grandes) ya validado en Módulo 4 y en "Movimientos RIPS". Ver metodología completa en [[Contratación#Nuevo módulo: Análisis de Códigos de Mayor Impacto Económico (2026-07-29)]].
 

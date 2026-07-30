@@ -89,11 +89,14 @@ Procedimientos, Medicamentos e Insumos son las 3 pestañas **fijas** del módulo
 
 ### La comparación es SIEMPRE dentro del mismo municipio
 
-Pedido explícito del usuario (2026-07-28): comparar tarifas de un mismo código entre prestadores de municipios distintos mezcla dos efectos — la variabilidad legítima "por ubicación" (el contrato se ofertó/negoció distinto según dónde está el prestador) con la variabilidad real "por negociación" (la que sí interesa detectar para tomar decisiones). Por eso el Módulo 2 nunca agrupa ni compara entre municipios: toda estadística (mínimo/máximo/promedio/mediana/semáforo) se calcula dentro de un mismo `ct_ips.municipio`.
+Pedido explícito del usuario (2026-07-28): comparar tarifas de un mismo código entre prestadores de municipios distintos mezcla dos efectos — la variabilidad legítima "por ubicación" (el contrato se ofertó/negoció distinto según dónde está el prestador) con la variabilidad real "por negociación" (la que sí interesa detectar para tomar decisiones). Por eso el Módulo 2 nunca agrupa ni compara entre municipios: toda estadística (mínimo/máximo/promedio/mediana/semáforo) se calcula dentro de un mismo municipio.
 
 Dos formas de llegar a la comparación (ambas implementadas, ver [[Tablas#Módulo 2 (Comparativo)]]):
 1. **Por municipio**: se elige un municipio y se listan todos los códigos que tienen ≥2 prestadores vigentes en ese municipio, ordenados por mayor variabilidad primero.
 2. **Por código**: se busca un código puntual y se muestra, agrupado por municipio, en cuáles municipios ese código tiene ≥2 prestadores comparables.
+
+> [!danger] Corrección 2026-07-30 — el "municipio" usado para agrupar era el del prestador, no el del contrato
+> Reportado por el usuario contra un caso real en "Perfil Competitivo del Prestador": GYO MEDICAL I.P.S. S.A.S. mostraba "Municipios donde opera: 1 — Riohacha", pero sus 2 contratos vigentes están administrados en Maicao y San Juan Del Cesar (ninguno en Riohacha). Causa raíz: la agrupación por municipio usaba `ct_ips.municipio` (municipio de registro/sede del prestador, fijo) en vez de `ct_ips_contrato.municipio_administracion` (municipio bajo el cual se administra CADA contrato) — verificado que 91 de 279 contratos vigentes (~33%) difieren entre ambos campos. Esto violaba la propia regla de esta sección ("comparar SIEMPRE dentro del mismo municipio"), mezclando en un mismo grupo tarifas negociadas para municipios distintos. **Fix**: las 4 consultas de agrupación del Módulo 2 (`comparativo-actions.ts`, `dashboard-riesgo-actions.ts`) ahora usan `municipio_administracion`. Afectaba también al Dashboard de Riesgo y a Perfil Competitivo del Prestador (que reutilizan la misma agrupación). Detalle completo y verificación en [[Tablas#Módulo 2 (Comparativo)]].
 
 ### Solo se muestran municipios/códigos donde la comparación es posible
 
@@ -242,17 +245,36 @@ Ninguna de las tablas de detalle tiene índice utilizable por fecha ni por prest
 
 Dado el hallazgo anterior, se acotó el alcance ANTES de construir, para no entregar una funcionalidad que se cuelgue en producción:
 1. **Tipos incluidos**: solo Servicios (CUPS) + Medicamentos (CUM) + Insumos — mismo alcance que Módulos 1/2/3. Consultas (`rips_ac`) y Hospitalizaciones (`rips_ah`) quedan para una futura iteración.
-2. **Período**: un **mes específico** a la vez (selector Mes/Año), nunca un rango libre — un rango abierto sobre tablas de cientos de millones de filas sin índice de fecha es la receta exacta para un timeout.
+2. **Período**: un **mes específico** a la vez (selector Mes/Año), nunca un rango libre — un rango abierto sobre tablas de cientos de millones de filas sin índice de fecha es la receta exacta para un timeout. **Ampliado 2026-07-30, ver corrección más abajo.**
 3. **Vista**: por prestador (como el Módulo 3), no un ranking de todos los prestadores a la vez — agregar sobre TODOS los prestadores en una sola consulta multiplicaría el costo del Seq Scan sin ninguna ganancia (ya es caro para uno solo).
 
 ### Estrategia de consulta — filtrar la tabla chica primero, saltar a las grandes por índice real
 
 `src/app/actions/consumo-frecuencia-actions.ts`:
-1. `obtenerFacturasDelMes(codigoPrestador, mes, anio)` — UNA sola consulta contra `rips_af` (la tabla MÁS PEQUEÑA de las RIPS) con `fecha_servicio_rips` acotada al mes exacto (`>= inicio AND < fin`, nunca abierta) y `fecha_anula IS NULL`. Devuelve la lista de `consecutivo_rips` de ese prestador en ese mes — típicamente un puñado a unos pocos miles de facturas, nunca "todas las facturas de la BD".
+1. `obtenerFacturasDelRango(codigoPrestador, fechaInicio, fechaFin)` — UNA sola consulta contra `rips_af` (la tabla MÁS PEQUEÑA de las RIPS) con `fecha_servicio_rips` acotada al rango exacto (`>= inicio AND <= fin`, ambos extremos inclusive) y `fecha_anula IS NULL`. Devuelve la lista de `consecutivo_rips` de ese prestador en ese rango — típicamente un puñado a unos pocos miles de facturas.
 2. Esa lista (ya acotada) se usa como `WHERE consecutivo_rips = ANY($1)` contra `rips_ap`/`rips_am`/`rips_at` — esa columna SÍ está indexada en las 3 tablas grandes, así que la resolución es por Index Scan (confirmado con `EXPLAIN ANALYZE`: ~100ms para 137 facturas → 4547 filas de procedimientos), no un escaneo completo.
 3. Las 3 consultas de detalle corren en paralelo (`Promise.all`) ya que son independientes entre sí.
 
+### Corrección 2026-07-30 — selector de mes único reemplazado por rango de fechas día-a-día, con tope de seguridad
+
+Pedido del usuario: cambiar el selector "Mes/Año" por uno donde se pueda elegir "desde qué día/mes hasta qué día/mes". Antes de implementarlo se verificó con `EXPLAIN ANALYZE` el costo real de ampliar el rango, para una decisión informada (no una suposición):
+
+- El costo del `Parallel Seq Scan` sobre `rips_af` es prácticamente **constante** independientemente del ancho del rango (está acotado por el tamaño total de la tabla, ~10,2M filas, no por la ventana de fechas) — un rango de 6 meses y uno de ~4,5 años (todo el histórico disponible, 2022-2026) tardaron ambos ~1.6-2.1s para el mismo prestador.
+- Lo que SÍ crece con el rango es el **tamaño del resultado** (`consecutivo_rips` encontrados) y, con él, el costo de los `Index Scan` posteriores sobre `rips_ap/am/at`: para el prestador de mayor volumen probado, un rango de ~4,5 años devolvió 12.452 facturas y tardó ~6s solo en la consulta de `rips_ap` (vs. ~100ms con 137 facturas de un mes) — dentro del timeout de 90s, pero ya no instantáneo, y sería el punto de falla si varios usuarios consultan rangos grandes a la vez (mismo riesgo de saturación del proxy ya documentado en el bug `TypeError: terminated` de "Top Impacto Económico", ver 09-Errores).
+
+**Decisión acordada con el usuario** (`AskUserQuestion`, 3 alternativas presentadas): rango libre día-a-día, pero con un **tope de seguridad de `MAX_DIAS_RANGO_CONSUMO` = 92 días (~3 meses calendario)** — amplía la flexibilidad pedida sin exponer el módulo al peor caso (rango de años, concurrente entre varios usuarios).
+
+**Implementación**:
+- `validarRangoConsumo(fechaInicio, fechaFin)` (`src/lib/negociacion/consumo-frecuencia.ts`) — función pura, única fuente de verdad del tope, usada tanto en el cliente (deshabilita "Consultar" y muestra el error inline) como en el servidor (`getConsumoPrestador` la valida y lanza; el Route Handler de exportación la valida antes y devuelve 400 con el mensaje exacto) — mismo patrón de "nunca confiar solo en la validación de cliente" ya aplicado en el resto del proyecto.
+- `ParametrosConsumoPrestador`/`ResultadoConsumoPrestador` (`src/types/consumo-frecuencia.ts`) cambiaron `mes`/`anio` (number) por `fechaInicio`/`fechaFin` (ISO `YYYY-MM-DD`, ambos extremos inclusive).
+- UI (`consumo-frecuencia-client.tsx`): 2 `<input type="date">` nativos (Desde/Hasta) en vez de los `<select>` de Mes/Año — mismo criterio del proyecto de usar controles nativos del navegador antes que una librería de terceros. `min`/`max` cruzados entre ambos inputs (la fecha "Hasta" no puede ser anterior a "Desde" y viceversa) más el tope de 92 días refuerzan la regla en la UI misma, además de la validación explícita.
+- Por defecto se sigue proponiendo el mes calendario completo anterior (mismo criterio de siempre: el mes en curso casi siempre está incompleto por rezago de radicación), ahora expresado como `fechaInicio`/`fechaFin` del primer/último día de ese mes.
+
 **Nunca** se filtra `rips_ap`/`rips_am`/`rips_at` directamente por fecha o por prestador — siempre se llega a ellas a través de la lista de `consecutivo_rips` ya resuelta desde `rips_af`.
+
+### Corrección crítica 2026-07-30 — facturas duplicadas por lotes re-radicados
+
+Detectada desde el drill-down nuevo de Top Impacto (no es un bug de este módulo, pero SÍ lo afectaba de la misma forma): `rips_af` puede tener la MISMA factura real repetida en varios lotes (`consecutivo_rips`) por recargas de RIPS no limpiadas — sin deduplicar por factura, `obtenerFacturasDelRango`/`obtenerConsumoServicios`/`obtenerConsumoMedicamentos`/`obtenerConsumoInsumos` contaban cada línea de detalle una vez POR LOTE. Ver hallazgo completo, magnitud (7,4% de inflación EPS-completa, hasta 13x en casos puntuales) y fix en [[Tablas#`rips_af` — una misma factura puede aparecer duplicada en varios lotes (`consecutivo_rips`) distintos]]. Fix aplicado: `construirFragmentoRango` ahora arma también la CTE `facturas_canonicas` (`src/lib/negociacion/rips-dedup.ts`), y las 3 consultas de detalle + el conteo de "facturas del rango" (KPI) la usan para deduplicar antes de agregar.
 
 ### Columnas reales de cantidad/valor por tipo (verificadas contra el esquema, no asumidas)
 
@@ -410,6 +432,9 @@ Cada tarjeta de prestador dentro del acordeón de "Perfil Competitivo del Presta
 - **Resolución del prestador**: se busca `codigo_prestador` en `ct_ips` a partir del `ips` ya conocido (el mismo `ips` que trae cada `PrestadorGrupoPerfil` del acordeón) — sin pedirle al usuario el NIT ni el código de prestador.
 - **Acotado a 500 facturas mostradas** (`LIMITE_FACTURAS_MOSTRADAS` en `movimiento-rips-actions.ts`, ordenadas por fecha descendente — se muestran las más recientes): los totales (cantidad/valor) siempre se calculan sobre el conjunto COMPLETO antes de acotar, solo la lista de filas mostradas se recorta, con un aviso visible si se truncó. Mismo criterio ya usado en `TOP_ENTRADAS_POR_NIVEL`/`TOP_SOBRECOSTOS_POR_PRESTADOR` del Dashboard de Riesgo.
 
+> [!danger] Corrección crítica 2026-07-30 — facturas duplicadas por lotes re-radicados
+> Este módulo tenía la misma vulnerabilidad detectada desde el drill-down de Top Impacto: `rips_af` puede repetir la misma factura real en varios lotes (`consecutivo_rips`) por recargas de RIPS no limpiadas, inflando cantidad/valor por factura hasta 13x en casos verificados. Ver hallazgo completo en [[Tablas#`rips_af` — una misma factura puede aparecer duplicada en varios lotes (`consecutivo_rips`) distintos]]. Fix aplicado: `obtenerMovimientoServicios/Medicamentos/Insumos` ahora anteponen la CTE `facturas_canonicas` (`src/lib/negociacion/rips-dedup.ts`) y unen por `numero_factura` antes de agregar.
+
 ### Corrección de rendimiento y error 413 (mismo día, tras primera prueba en pantalla)
 
 La primera versión resolvía la lista de `consecutivo_rips` del prestador en Node (primera consulta) y la volvía a enviar como parámetro — un array de miles/decenas de miles de bigints — en una SEGUNDA consulta HTTP al proxy. Para un prestador con muchas facturas históricas, ese array serializado a JSON superó el límite de tamaño de payload del proxy: `Error: El servicio proxy de base de datos no está disponible (413)`. El usuario también reportó que la consulta "se demora mucho".
@@ -517,8 +542,57 @@ El fix anterior (LEFT JOIN + bucket "Código no registrado: X") era honesto pero
 
 **Resultado verificado**: con este cambio, la consulta "por prestador" para Clínica Médicos ya NO se parte en 3 filas — todo el valor de AP ($4.443M en la prueba) aparece consolidado en una sola fila "CLINICA MEDICOS S.A.", como debe ser. El bucket "Código no registrado: X" sigue existiendo como red de seguridad (para los ~2 códigos de `rips_af` EPS-completa que de verdad no tienen fila en `ct_ips`), pero ya no aparece para el caso común de sedes múltiples de un mismo prestador.
 
+#### 🔴 Bug crítico introducido por la mejora anterior, corregido el mismo día: `rips_af.consecutivo_rips` NO es único
+
+Reportado por el usuario tras probar la mejora de arriba: "después de un rato me arroja información poco real, me parecía más real la primera" — mostrando un screenshot con el KPI "Valor total radicado" en **$8.765.742.161.989** (8.76 billones de pesos) y un código "S50008" (TRANSPORTE INTERMUNICIPAL TERRESTRE, catálogo `tb_cup`, vive en `rips_at`) como "mayor impacto económico" con **$7.483.119.066.500** — un solo código representando ~85% del gasto total de la EPS, cifra a todas luces imposible.
+
+**Causa raíz verificada en la BD real**: se asumió (como en el resto del proyecto) que `consecutivo_rips` identifica una factura. Es falso — se comporta como un identificador de **lote/radicación** compartido por muchas facturas del mismo prestador el mismo día. Caso verificado: `consecutivo_rips = 720812` aparece en **951 filas distintas** de `rips_af` (951 `numero_factura`/`consecutivo_rips_af` diferentes, mismo `codigo_prestador`, misma `fecha_servicio_rips`). El `JOIN facturas_periodo fp ON fp.consecutivo_rips = <alias>.consecutivo_rips` de la mejora anterior se armó sobre una CTE que seleccionaba `consecutivo_rips, codigo_prestador` **sin deduplicar** — así que para cada línea de `rips_at`/`rips_ap`/etc. cuyo `consecutivo_rips` cae en uno de estos lotes, el `JOIN` la multiplicaba por la cantidad de facturas del lote (hasta 951x). Verificado con consulta directa: el valor real de S50008 (año 2026) es **$11.260.116.450** (81.234 filas) — la app mostraba 664 veces más.
+
+**Por qué la "primera" versión (antes de la mejora #80) se veía más real**: esa versión NO hacía este `JOIN` — tomaba `<alias>.codigo_prestador` directamente de la línea de detalle, sin pasar por la CTE de facturas, así que no sufría el fanout (a cambio de tener el problema, ya corregido, de sedes no registradas en `ct_ips`).
+
+**Fix aplicado**: `SELECT DISTINCT ON (consecutivo_rips) consecutivo_rips, codigo_prestador ... ORDER BY consecutivo_rips` en la CTE `facturas_periodo` (`construirFragmentoFacturas`) — garantiza exactamente una fila por `consecutivo_rips`, eliminando el fanout del `JOIN` sin perder la atribución por prestador de la factura. Se verificó que `codigo_prestador` es consistente entre las filas de un mismo `consecutivo_rips` en la enorme mayoría de los casos (0 conflictos en los grupos con más duplicidad de 2026); existen 717 grupos EPS-completa (todos los años) con más de un `codigo_prestador` distinto para el mismo `consecutivo_rips` (inconsistencia de origen, no de esta consulta) — `DISTINCT ON` los resuelve eligiendo uno de forma determinística en vez de multiplicar filas.
+
+**Verificado tras el fix** (año 2026, EPS completa): S50008 vuelve a sumar $11.260.116.450 (correcto), y el total agregado AP+AC+AM+AT baja de los $8.76 billones mostrados en el bug a **~$167.910.912.983** — un orden de magnitud coherente con lo esperado para una EPS de este tamaño. `EXPLAIN ANALYZE` confirma que el costo adicional del `Unique`/`Sort` dentro de la CTE materializada es aceptable (pagado una sola vez por consulta, no por cada rama del `UNION ALL`).
+
+**Lección para todo el proyecto**: cualquier código futuro que necesite JOIN-ear `rips_af` de vuelta hacia las tablas de detalle usando `consecutivo_rips` (no solo en este módulo) debe asumir que esa columna puede tener duplicados y deduplicar antes de usarla como lado "uno" de un `JOIN` — usarla únicamente como filtro (`WHERE consecutivo_rips = ANY(...)`) es seguro (no multiplica filas), pero usarla como condición de `JOIN` sin deduplicar no lo es.
+
+### Corrección 2026-07-30 — descripción faltante en códigos de "insumos" que en realidad son CUPS de estancia
+
+Reportado por el usuario: códigos como `108A01` (Internación UCI Neonatal) aparecían sin descripción en el ranking. Causa y fix completos en [[Tablas#`rips_at` (tipo "insumos" en Módulo 4 / Top Impacto) — códigos de estancia son CUPS reales, no insumos]] — resumen: son códigos CUPS reales reportados vía `rips_at` en vez de `rips_ap`, así que no resolvían contra `tb_insumo`; se agregó `tb_cup` como catálogo de respaldo (354 de 8.288 códigos de `rips_at`, pero 73% del valor). Mismo fix aplicado en Módulo 4 (Consumo y Frecuencia, `obtenerConsumoInsumos`), que comparte el mismo patrón de resolución.
+
 ### Tabla Top 100 — ordenable, paginada de a 25
 A diferencia de otras tablas del proyecto (paginadas de a 100), aquí se usa `PAGE_SIZE = 25` porque el set completo ya está acotado a 100 filas (no tiene sentido una página de 100 sobre un total de 100). Las columnas Cantidad/Valor total/Valor promedio/Prestadores/% del total son clicables para ordenar asc/desc (`ArrowDownUp`) — pedido implícito del usuario ("permitiendo ordenar... la información fácilmente"), resuelto 100% en cliente (`Array.sort` sobre las 100 filas ya traídas, sin nueva consulta).
+
+### Selector en cascada Prestador → Contrato(s) → Municipio (2026-07-30)
+
+Pedido del usuario: agregar búsqueda al selector de prestador (el listado alfabético de ~300 prestadores era difícil de navegar sin buscador) y, al elegir un prestador, que el filtro de Contrato muestre solo SUS contratos vigentes (no los ~280 de toda la EPS) permitiendo marcar uno, varios o todos, con el municipio de administración correspondiente mostrado automáticamente en vez de un selector aparte.
+
+- **Búsqueda de prestador**: `Input` de texto (nombre o NIT) que filtra en cliente el `<select>` existente — mismo patrón ya usado en Consumo y Frecuencia.
+- **`getContratosPrestador(ips)`** (nuevo, `top-impacto-actions.ts`): trae los contratos vigentes de un prestador puntual con su `municipio_administracion` ya resuelto a nombre — **no** `ct_ips.municipio` (mismo criterio ya corregido en el Módulo 2 el mismo día, ver [[Tablas#Módulo 2 (Comparativo)]]).
+- **UI**: al elegir un prestador, los selectores independientes de Municipio/Contrato (EPS-completa) se ocultan y se reemplazan por chips clicables (uno por contrato del prestador, con su municipio) más un atajo "Todos"/"Ninguno". Todos quedan marcados por defecto.
+
+> [!important] Marcar 1 contrato vs. todos los del MISMO prestador no cambia el valor radicado
+> Los RIPS se atribuyen por `codigo_prestador` (la entidad/sede facturadora vía `rips_af`), no por número de contrato individual — un prestador con varios contratos vigentes casi siempre comparte el mismo `codigo_prestador` en los 3 (ver el hallazgo de "códigos de prestador huérfanos" más arriba en este documento). Por eso el selector de contratos aquí es **informativo** (confirma en qué municipio se administra cada contrato del prestador) y sirve para acotar contratos cuando NO hay prestador elegido (selección EPS-completa, comportamiento sin cambios), pero no sub-filtra los RIPS de un prestador ya elegido. Esto se explica en un texto visible bajo los chips para que el analista no espere que el total cambie al desmarcar un contrato.
+- **Backend**: `FiltrosImpacto.numeroContrato` (string) → `numerosContrato` (`string[]`), con `= ANY($n)` en `construirFragmentoFacturas`. El export (`/api/export/top-impacto`) acepta `numerosContrato` como lista separada por comas (mismo criterio que `estados` en `/api/export/comparativo`).
+
+### Drill-down "de lo general a lo particular" en Top 20 prestadores (2026-07-30)
+
+Pedido del usuario: "si yo le doy doble clic en Top 20 prestadores por valor radicado a un prestador mostrarme de que servicios viene ese dinero... y llevarme por doble clic a una información más detallada hasta las facturas". 2 niveles de doble clic:
+
+- **Nivel 2** (doble clic en una barra de "Top 20 prestadores por valor radicado"): abre un modal con el desglose por código de ESE prestador (tabla: tipo, código, descripción, cantidad, valor, % del prestador). No se agregó ninguna consulta nueva — se reutiliza `getTopImpacto`, pero llamada de nuevo con `resultado.filtros` (los filtros YA usados para calcular esa barra, no el estado vivo de los selectores) sobrescribiendo solo `ips`. Esto garantiza que el total del desglose coincida exacto con el valor de la barra sin importar qué haya cambiado el usuario en los selectores después de consultar.
+- **Nivel 3** (doble clic en una fila del desglose del Nivel 2): abre un modal con el detalle factura por factura de ese código (`getFacturasCodigoImpacto`, nueva Server Action en `top-impacto-actions.ts`), mostrando N° Factura, Fecha, Cantidad y Valor, con los totales calculados sobre TODAS las facturas encontradas (la lista mostrada se acota a las 500 más recientes, mismo criterio que "Movimientos RIPS").
+
+> [!important] Por qué no se reutilizó `getMovimientoRipsCodigo` (módulo "Movimientos RIPS") para el Nivel 3
+> Esa función acota las facturas por la **vigencia del contrato** del prestador (hoy = 2026) y no soporta el tipo "consultas". Este módulo filtra por **año elegido** en el selector, no por vigencia, y sí incluye "consultas" — reutilizar `getMovimientoRipsCodigo` habría mostrado un total inconsistente con el que ya se ve en el Nivel 2/el gráfico de este mismo módulo. Se creó `getFacturasCodigoImpacto`, que reutiliza la misma CTE año-acotada (`construirFragmentoFacturas`) que el resto de Top Impacto.
+
+> [!warning] Caso borde — "Código no registrado" (ver `FilaImpactoPrestador.ips = null`)
+> Cuando la barra corresponde a un `codigo_prestador` sin fila en `ct_ips` (sedes/códigos de habilitación no registrados, ver hallazgo documentado más arriba en este mismo documento), el doble clic abre igual el modal pero muestra un mensaje explicando que no se puede volver a filtrar por ese código (no hay `ips` numérico) — el dinero es real, simplemente no hay cómo profundizar sin que TI registre ese código en `ct_ips`. No se oculta el botón/interacción; se explica la limitación, mismo criterio de transparencia que el resto del módulo.
+
+> [!note] Columnas de `rips_ac` confirmadas (actualizado 2026-07-30)
+> `rips_ac.numero_factura` y `rips_ac.fecha_consulta` se confirmaron contra la BD real (`information_schema.columns`, vía conector de solo lectura) — el detalle de facturas de tipo "consultas" en este drill-down es confiable en cuanto a nombres de columna.
+
+> [!danger] Hallazgo crítico verificado el mismo día (2026-07-30) — el drill-down destapó una duplicación de facturas mucho más grave que un bug de este módulo
+> Al usar el drill-down recién construido, el usuario reportó una factura (`MV06370`) mostrando 5x su valor real ($850.000 vs. $170.000). La causa NO estaba en el drill-down ni en Top Impacto en particular: `rips_af` tiene facturas duplicadas en múltiples lotes (`consecutivo_rips`) por recargas de RIPS no limpiadas — afecta TODOS los módulos que agregan las tablas RIPS grandes (Top Impacto, Consumo y Frecuencia, Movimientos RIPS). Ver el hallazgo completo, la magnitud (7,4% de inflación EPS-completa, hasta 13x en casos puntuales) y el fix aplicado (`src/lib/negociacion/rips-dedup.ts`) en [[Tablas#`rips_af` — una misma factura puede aparecer duplicada en varios lotes (`consecutivo_rips`) distintos]].
 
 ## Ver también
 - [[Validaciones]]

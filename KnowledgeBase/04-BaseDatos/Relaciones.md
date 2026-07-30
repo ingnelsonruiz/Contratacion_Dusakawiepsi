@@ -22,7 +22,8 @@ En el esquema SIE existente (solo lectura), el Módulo 1 ✅ sí usa relaciones 
 | `tb_medicamento.marca_medicamento` | → | `tb_marca_medicamento.marca_medicamento` | Laboratorio |
 | `tb_tarifario_propio_detalle.codigo_tarifa` | → | `tb_insumo.codigo_interno` | **Join por código, no por FK** — `consecutivo_insumo` siempre NULL, mismo patrón que `consecutivo_cup` |
 | `tb_tarifario_propio_detalle.consecutivo_unidad` | → | `tb_unidad_medida.consecutivo_unidad_medida` | Unidad de medicamentos/insumos |
-| `ct_ips.municipio` | → | `tb_municipio.municipio` | Código estilo DANE (varchar), no texto libre. Usado por Módulo 2 para agrupar prestadores por ubicación |
+| `ct_ips_contrato.municipio_administracion` | → | `tb_municipio.municipio` | Código estilo DANE (varchar), no texto libre. **Es la relación correcta** para agrupar por ubicación en el Módulo 2 (comparativo/dashboard de riesgo/perfil del prestador) — corregido 2026-07-28→2026-07-30, ver hallazgo abajo |
+| `ct_ips.municipio` | → | `tb_municipio.municipio` | Municipio de **registro/sede** del prestador (fijo por `ips`), distinto del municipio de administración de sus contratos. Se sigue usando para el municipio de "Análisis de Códigos de Mayor Impacto Económico" (RIPS por sede física), pero **ya no** para agrupar el Módulo 2 — ver [[Tablas#Módulo 2 (Comparativo)]] |
 | `tb_municipio.departamento` | → | `tb_municipio.municipio` (self-join) | **`tb_municipio` es auto-referenciada**: `departamento` de un municipio es OTRO código de la misma tabla — para resolver el nombre del departamento hace falta un segundo join sobre `tb_municipio` (mismo patrón ya usado en el resto del ecosistema Dusakawi, ver `CLAUDE.md` de `Proyecto_Dusakawi`). Implementado en `getOpcionesMunicipios`/`getComparativoPorCodigo` de `src/app/actions/comparativo-actions.ts` |
 
 ## Relaciones planificadas
