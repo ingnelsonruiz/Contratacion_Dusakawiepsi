@@ -18,10 +18,23 @@
  *
  * Estrategia de consulta: filtrar primero `rips_af` (10M filas, la más
  * pequeña de las tablas RIPS) por `codigo_prestador` + `fecha_servicio_rips`
- * dentro del mes elegido → de ahí se obtiene la lista de `consecutivo_rips`
- * (facturas) reales de ese prestador en ese mes, y se cruza esa lista (ya
+ * dentro del rango elegido → de ahí se obtiene la lista de `consecutivo_rips`
+ * (facturas) reales de ese prestador en ese rango, y se cruza esa lista (ya
  * acotada) contra `rips_ap`/`rips_am`/`rips_at` por `consecutivo_rips`, que
  * SÍ está indexado en las 3 tablas grandes.
+ *
+ * Corrección 2026-07-30 (pedido del usuario): el selector pasó de "un mes
+ * específico" a un rango de fechas día-a-día (fechaInicio/fechaFin), con un
+ * tope de seguridad de `MAX_DIAS_RANGO_CONSUMO` días (~3 meses) — decidido
+ * con el usuario tras verificar con `EXPLAIN ANALYZE` que el costo del Seq
+ * Scan sobre `rips_af` es prácticamente constante (bounded por el tamaño de
+ * la tabla, no por el ancho del rango), pero el tamaño del resultado
+ * (`consecutivo_rips` encontrados) sí crece con el rango y con él el costo de
+ * los `Index Scan` posteriores sobre `rips_ap/am/at` — un prestador de alto
+ * volumen con ~4.5 años de rango (todo el histórico disponible) tardó ~6-8s
+ * por tabla, ya no instantáneo. El tope evita que un rango arbitrariamente
+ * grande (o varios usuarios consultando rangos grandes a la vez) arriesgue el
+ * timeout de 90s del proxy. Ver KnowledgeBase/05-ReglasNegocio/Contratación.md.
  */
 
 export type TipoConsumo = "servicios" | "medicamentos" | "insumos";
@@ -56,15 +69,16 @@ export interface KpisConsumoPrestador {
 
 export interface ParametrosConsumoPrestador {
   codigoPrestador: string;
-  mes: number; // 1-12
-  anio: number;
+  /** ISO `YYYY-MM-DD`, inclusive en ambos extremos. */
+  fechaInicio: string;
+  fechaFin: string;
 }
 
 export interface ResultadoConsumoPrestador {
   codigoPrestador: string;
   razonSocial: string;
-  mes: number;
-  anio: number;
+  fechaInicio: string;
+  fechaFin: string;
   filas: FilaConsumoCodigo[];
   kpis: KpisConsumoPrestador;
 }

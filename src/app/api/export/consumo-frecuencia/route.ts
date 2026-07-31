@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { getConsumoPrestador } from "@/app/actions/consumo-frecuencia-actions";
+import { validarRangoConsumo } from "@/lib/negociacion/consumo-frecuencia";
+import { formatearFecha } from "@/lib/negociacion/formato";
 import { construirCsv, crearLibroExcel, agregarHojaExcel, type ColumnaExportable } from "@/lib/negociacion/exportar";
 import type { TipoConsumo, FilaConsumoCodigo } from "@/types/consumo-frecuencia";
 
@@ -8,6 +10,13 @@ import type { TipoConsumo, FilaConsumoCodigo } from "@/types/consumo-frecuencia"
  * Exportación binaria (Excel/CSV) del módulo Consumo y Frecuencia. Mismo
  * patrón que /api/export/comparativo y /api/export/historico-prestador:
  * Route Handler (no Server Action) porque el resultado es un archivo binario.
+ *
+ * Corrección 2026-07-30: `mes`/`anio` → `fechaInicio`/`fechaFin` (rango
+ * día-a-día), mismo cambio que en consumo-frecuencia-actions.ts. Se valida el
+ * rango aquí ANTES de llamar a `getConsumoPrestador` para poder devolver un
+ * 400 con el mensaje exacto (la Server Action también valida y lanza, pero
+ * un Route Handler no debe depender de parsear el mensaje de una excepción
+ * para decidir el código HTTP).
  */
 
 const ETIQUETAS_TIPO: Record<TipoConsumo, string> = {
@@ -15,11 +24,6 @@ const ETIQUETAS_TIPO: Record<TipoConsumo, string> = {
   medicamentos: "Medicamento (CUM)",
   insumos: "Insumo",
 };
-
-const NOMBRES_MES = [
-  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
-];
 
 function sanearNombreArchivo(texto: string): string {
   // \u0300-\u036f = rango Unicode "Combining Diacritical Marks" — código
@@ -64,17 +68,22 @@ function mapearFila(f: FilaConsumoCodigo): FilaDetalle {
 export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const codigoPrestador = params.get("codigoPrestador");
-  const mes = Number(params.get("mes"));
-  const anio = Number(params.get("anio"));
+  const fechaInicio = params.get("fechaInicio");
+  const fechaFin = params.get("fechaFin");
   const tipo = params.get("tipo") as TipoConsumo | null;
   const formato = (params.get("formato") ?? "xlsx") as "xlsx" | "csv";
 
-  if (!codigoPrestador || !mes || !anio) {
-    return NextResponse.json({ error: "Los parámetros 'codigoPrestador', 'mes' y 'anio' son obligatorios." }, { status: 400 });
+  if (!codigoPrestador || !fechaInicio || !fechaFin) {
+    return NextResponse.json({ error: "Los parámetros 'codigoPrestador', 'fechaInicio' y 'fechaFin' son obligatorios." }, { status: 400 });
+  }
+
+  const validacion = validarRangoConsumo(fechaInicio, fechaFin);
+  if (!validacion.valido) {
+    return NextResponse.json({ error: validacion.error }, { status: 400 });
   }
 
   try {
-    const resultado = await getConsumoPrestador(codigoPrestador, mes, anio);
+    const resultado = await getConsumoPrestador(codigoPrestador, fechaInicio, fechaFin);
     if (!resultado) {
       return NextResponse.json({ error: "No se encontró información para ese prestador." }, { status: 404 });
     }
@@ -86,9 +95,9 @@ export async function GET(request: NextRequest) {
 
     const filasParametros = [
       { Parámetro: "Prestador", Valor: `${resultado.razonSocial} (código ${resultado.codigoPrestador})` },
-      { Parámetro: "Período", Valor: `${NOMBRES_MES[resultado.mes - 1]} ${resultado.anio}` },
+      { Parámetro: "Período", Valor: `${formatearFecha(resultado.fechaInicio)} — ${formatearFecha(resultado.fechaFin)}` },
       { Parámetro: "Filtro de tipo", Valor: tipo ? ETIQUETAS_TIPO[tipo] : "Todos" },
-      { Parámetro: "Facturas del mes", Valor: String(resultado.kpis.cantidadFacturas) },
+      { Parámetro: "Facturas del período", Valor: String(resultado.kpis.cantidadFacturas) },
       { Parámetro: "Códigos distintos", Valor: String(detalle.length) },
       { Parámetro: "Valor total facturado", Valor: String(resultado.kpis.valorTotalFacturado) },
       { Parámetro: "Generado el", Valor: new Date().toLocaleString("es-CO", { timeZone: "America/Bogota" }) },
@@ -116,7 +125,7 @@ export async function GET(request: NextRequest) {
     const contentType =
       formato === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : "text/csv;charset=utf-8";
     const extension = formato === "xlsx" ? "xlsx" : "csv";
-    const nombreArchivo = `${sanearNombreArchivo(`Consumo_${resultado.razonSocial}_${NOMBRES_MES[resultado.mes - 1]}_${resultado.anio}`)}.${extension}`;
+    const nombreArchivo = `${sanearNombreArchivo(`Consumo_${resultado.razonSocial}_${resultado.fechaInicio}_a_${resultado.fechaFin}`)}.${extension}`;
 
     return new NextResponse(new Uint8Array(buffer), {
       status: 200,

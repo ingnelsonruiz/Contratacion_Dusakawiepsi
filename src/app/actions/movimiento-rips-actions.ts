@@ -33,6 +33,7 @@
 
 import { pool } from "@/lib/db";
 import { CONTRATOS_EXCLUIDOS_MIGRACION } from "@/lib/negociacion/constantes";
+import { sqlFacturasCanonicas, joinFacturaCanonica } from "@/lib/negociacion/rips-dedup";
 import type { TipoComparativo } from "@/types/comparativo";
 import type { ResultadoMovimientoRips, FilaFacturaMovimientoRips } from "@/types/movimiento-rips";
 
@@ -53,9 +54,22 @@ const LIMITE_FACTURAS_MOSTRADAS = 500;
  * usando `rips_ap_idx_rips` (~2 segundos, mismo resultado). Si en el futuro
  * se toca esta consulta, mantener la forma `= ANY(ARRAY(...))`.
  */
+const CONDICION_FACTURAS_PRESTADOR = "codigo_prestador = $1 AND fecha_anula IS NULL";
+
 const SUBQUERY_FACTURAS_PRESTADOR = `
-  ARRAY(SELECT consecutivo_rips FROM administrativo.rips_af WHERE codigo_prestador = $1 AND fecha_anula IS NULL)
+  ARRAY(SELECT consecutivo_rips FROM administrativo.rips_af WHERE ${CONDICION_FACTURAS_PRESTADOR})
 `;
+
+/**
+ * CTE de deduplicación — hallazgo crítico 2026-07-30 (ver
+ * `src/lib/negociacion/rips-dedup.ts` y KnowledgeBase/04-BaseDatos/Tablas.md):
+ * una misma factura real puede aparecer repetida en varios lotes
+ * (`consecutivo_rips`) de `rips_af` por recargas de RIPS no limpiadas. Sin
+ * esta CTE, `obtenerMovimiento*` contaba cada factura una vez POR LOTE en
+ * vez de una sola vez (verificado hasta 13x de inflación en casos reales).
+ * Se antepone a las 3 consultas de este módulo.
+ */
+const CTE_FACTURAS_CANONICAS = `WITH facturas_canonicas AS MATERIALIZED (${sqlFacturasCanonicas(CONDICION_FACTURAS_PRESTADOR)})`;
 
 interface FilaCrudaFactura {
   numeroFactura: string;
@@ -100,12 +114,14 @@ async function obtenerMovimientoServicios(
   const params: unknown[] = [codigoPrestador, codigoTarifa];
   const filtroFecha = vigencia ? construirFiltroFecha("fecha_procedimiento", vigencia, params) : "";
   const sql = `
-    SELECT numero_factura, fecha_procedimiento AS fecha, COUNT(*) AS cantidad, SUM(valor_procedimiento) AS valor
+    ${CTE_FACTURAS_CANONICAS}
+    SELECT rips_ap.numero_factura AS numero_factura, fecha_procedimiento AS fecha, COUNT(*) AS cantidad, SUM(valor_procedimiento) AS valor
     FROM administrativo.rips_ap
+    ${joinFacturaCanonica("rips_ap")}
     WHERE codigo_procedimiento = $2
       AND consecutivo_rips = ANY(${SUBQUERY_FACTURAS_PRESTADOR})
       ${filtroFecha}
-    GROUP BY numero_factura, fecha_procedimiento
+    GROUP BY rips_ap.numero_factura, fecha_procedimiento
   `;
   const result = await pool.query(sql, params, `${SOURCE}/movimiento-servicios`);
   const rows: any[] = result?.rows ?? [];
@@ -125,12 +141,14 @@ async function obtenerMovimientoMedicamentos(
   const params: unknown[] = [codigoPrestador, codigoTarifa];
   const filtroFecha = vigencia ? construirFiltroFecha("fecha_dispensacion", vigencia, params) : "";
   const sql = `
-    SELECT numero_factura, fecha_dispensacion AS fecha, SUM(numero_unidades) AS cantidad, SUM(valor_total_medicamento) AS valor
+    ${CTE_FACTURAS_CANONICAS}
+    SELECT rips_am.numero_factura AS numero_factura, fecha_dispensacion AS fecha, SUM(numero_unidades) AS cantidad, SUM(valor_total_medicamento) AS valor
     FROM administrativo.rips_am
+    ${joinFacturaCanonica("rips_am")}
     WHERE codigo_medicamento = $2
       AND consecutivo_rips = ANY(${SUBQUERY_FACTURAS_PRESTADOR})
       ${filtroFecha}
-    GROUP BY numero_factura, fecha_dispensacion
+    GROUP BY rips_am.numero_factura, fecha_dispensacion
   `;
   const result = await pool.query(sql, params, `${SOURCE}/movimiento-medicamentos`);
   const rows: any[] = result?.rows ?? [];
@@ -153,12 +171,14 @@ async function obtenerMovimientoInsumos(
   const params: unknown[] = [codigoPrestador, codigoTarifa];
   const filtroFecha = vigencia ? construirFiltroFecha("fecha_atencion", vigencia, params) : "";
   const sql = `
-    SELECT numero_factura, fecha_atencion AS fecha, SUM(cantidad) AS cantidad, SUM(valor_total_material) AS valor
+    ${CTE_FACTURAS_CANONICAS}
+    SELECT rips_at.numero_factura AS numero_factura, fecha_atencion AS fecha, SUM(cantidad) AS cantidad, SUM(valor_total_material) AS valor
     FROM administrativo.rips_at
+    ${joinFacturaCanonica("rips_at")}
     WHERE codigo_servicio = $2
       AND consecutivo_rips = ANY(${SUBQUERY_FACTURAS_PRESTADOR})
       ${filtroFecha}
-    GROUP BY numero_factura, fecha_atencion
+    GROUP BY rips_at.numero_factura, fecha_atencion
   `;
   const result = await pool.query(sql, params, `${SOURCE}/movimiento-insumos`);
   const rows: any[] = result?.rows ?? [];

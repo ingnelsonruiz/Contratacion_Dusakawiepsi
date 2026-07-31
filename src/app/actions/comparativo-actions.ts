@@ -17,10 +17,23 @@
  *   1. Las FKs consecutivo_cup/consecutivo_medicamento/consecutivo_insumo NO
  *      son confiables — el cruce con el maestro real es siempre por código
  *      (d.codigo_tarifa = <maestro>.codigo_interno).
- *   2. ct_ips.municipio es un código estilo DANE que resuelve su nombre y su
+ *   2. El código de municipio (estilo DANE) resuelve su nombre y su
  *      departamento vía un doble self-join sobre tb_municipio (tb_municipio.
  *      departamento es OTRO código de tb_municipio.municipio, no texto libre)
  *      — patrón ya usado en el resto del ecosistema Dusakawi (ver CLAUDE.md).
+ *
+ * Corrección 2026-07-30 — el "municipio" de agrupación es el del CONTRATO,
+ * no el del prestador: se usa `ct_ips_contrato.municipio_administracion`
+ * (municipio bajo el cual se administra ESE contrato específico), no
+ * `ct_ips.municipio` (municipio de registro de la sede del prestador, fijo
+ * por `ips`). Un mismo prestador puede tener contratos administrados en
+ * municipios distintos al de su sede registrada — verificado con datos
+ * reales (GYO MEDICAL I.P.S. S.A.S., ips 801870: registrado en Riohacha
+ * pero con contratos administrados en Maicao y San Juan Del Cesar; a escala
+ * de toda la BD, 91 de 279 contratos vigentes —~33%— difieren). Usar
+ * ct_ips.municipio mezclaba en un mismo grupo tarifas negociadas para
+ * municipios distintos — justo lo que esta regla de negocio busca evitar.
+ * Ver KnowledgeBase/04-BaseDatos/Tablas.md y Relaciones.md para el detalle.
  */
 
 import { pool } from "@/lib/db";
@@ -163,7 +176,19 @@ export async function getOpcionesMunicipios(tipo: TipoComparativo): Promise<Opci
       COUNT(DISTINCT c.ips) AS cantidad_prestadores
     FROM administrativo.ct_ips_contrato c
     JOIN administrativo.ct_ips ips ON ips.ips = c.ips
-    JOIN administrativo.tb_municipio munA ON munA.municipio = ips.municipio
+    -- Corrección 2026-07-30: se agrupaba por ips.municipio (municipio de
+    -- registro/sede del prestador, fijo por ips), no por el municipio bajo el
+    -- cual se administra CADA contrato (c.municipio_administracion). Un mismo
+    -- prestador puede tener contratos administrados en municipios distintos
+    -- al de su sede registrada (verificado: 91 de 279 contratos vigentes,
+    -- ~33%, tienen municipio_administracion != ips.municipio — caso real
+    -- reportado por el usuario: GYO MEDICAL I.P.S. S.A.S., ips 801870,
+    -- registrado en Riohacha (44001) pero con contratos administrados en
+    -- Maicao (44430) y San Juan Del Cesar (44650)). Agrupar por ips.municipio
+    -- mezclaba tarifas negociadas para municipios distintos en un solo grupo
+    -- de comparación — justo el problema que esta regla de negocio busca
+    -- evitar (ver KnowledgeBase/05-ReglasNegocio/Contratación.md).
+    JOIN administrativo.tb_municipio munA ON munA.municipio = c.municipio_administracion
     JOIN administrativo.tb_municipio depA ON depA.municipio = munA.departamento
     JOIN administrativo.tb_tarifario_propio_detalle d ON d.consecutivo_tarifa = c.${cfg.columnaTarifario}
     JOIN ${cfg.tablaMaestro} ${cfg.aliasMaestro} ON ${cfg.aliasMaestro}.codigo_interno = d.codigo_tarifa
@@ -223,7 +248,10 @@ async function construirGruposMunicipio(
     JOIN administrativo.ct_ips ips ON ips.ips = c.ips
     JOIN administrativo.tb_tarifario_propio_detalle d ON d.consecutivo_tarifa = c.${cfg.columnaTarifario}
     JOIN ${cfg.tablaMaestro} ${cfg.aliasMaestro} ON ${cfg.aliasMaestro}.codigo_interno = d.codigo_tarifa
-    WHERE ips.municipio = $2
+    -- Corrección 2026-07-30: filtrar por c.municipio_administracion (municipio
+    -- bajo el cual se administra ESTE contrato), no por ips.municipio (sede
+    -- registrada del prestador, fija). Ver detalle en getOpcionesMunicipios.
+    WHERE c.municipio_administracion = $2
       AND c.sw_activo = 1
       AND c.fecha_anula IS NULL
       AND c.numero_contrato != ALL($1)
@@ -369,18 +397,21 @@ export async function getComparativoPorCodigo(
   let condicionMunicipio = "";
   if (municipioCodigo) {
     sqlParams.push(municipioCodigo);
-    condicionMunicipio = `AND ips.municipio = $${sqlParams.length}`;
+    // Corrección 2026-07-30: filtrar/agrupar por el municipio de administración
+    // del CONTRATO, no por el municipio de registro del prestador — ver
+    // detalle completo en getOpcionesMunicipios más arriba en este archivo.
+    condicionMunicipio = `AND c.municipio_administracion = $${sqlParams.length}`;
   }
 
   const sql = `
     SELECT
       c.ips, ips.razon_social, ips.nit, c.numero_contrato, c.consecutivo_contrato,
-      ips.municipio AS municipio_codigo, munA.descripcion AS municipio_nombre, depA.descripcion AS departamento_nombre,
+      c.municipio_administracion AS municipio_codigo, munA.descripcion AS municipio_nombre, depA.descripcion AS departamento_nombre,
       d.codigo_tarifa, ${cfg.aliasMaestro}.descripcion AS descripcion_maestro,
       d.valor, d.valor_servicio, d.valor_base, d.valor_pactado, d.porcentaje_tarifa
     FROM administrativo.ct_ips_contrato c
     JOIN administrativo.ct_ips ips ON ips.ips = c.ips
-    JOIN administrativo.tb_municipio munA ON munA.municipio = ips.municipio
+    JOIN administrativo.tb_municipio munA ON munA.municipio = c.municipio_administracion
     JOIN administrativo.tb_municipio depA ON depA.municipio = munA.departamento
     JOIN administrativo.tb_tarifario_propio_detalle d ON d.consecutivo_tarifa = c.${cfg.columnaTarifario}
     JOIN ${cfg.tablaMaestro} ${cfg.aliasMaestro} ON ${cfg.aliasMaestro}.codigo_interno = d.codigo_tarifa

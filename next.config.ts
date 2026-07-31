@@ -9,6 +9,16 @@ const nextConfig: NextConfig = {
   eslint: {
     ignoreDuringBuilds: true,
   },
+  experimental: {
+    // El límite por defecto de Server Actions es 1MB — insuficiente para el
+    // archivo de propuesta (CSV/TXT/XLSX) del módulo "Análisis de Propuesta
+    // del Prestador" (evaluarPropuestaPrestador recibe el archivo como
+    // FormData). Debe mantenerse coherente con TAMANO_MAXIMO_ARCHIVO_BYTES
+    // en src/app/actions/analisis-propuesta-actions.ts.
+    serverActions: {
+      bodySizeLimit: "10mb",
+    },
+  },
   // 2026-07-28 — causa raíz REAL del "__webpack_require__.n is not a
   // function" en /login (se repitió 4 veces con el intento anterior, que
   // agregaba `modularizeImports` para lucide-react): Next.js 15 optimiza

@@ -58,12 +58,39 @@ export interface OpcionesFiltrosImpacto {
   anios: number[];
 }
 
+/**
+ * Contrato vigente de UN prestador puntual, con su municipio de
+ * administración ya resuelto — agregado 2026-07-30 para el selector en
+ * cascada Prestador → Contrato(s) → Municipio (ver `getContratosPrestador`
+ * en top-impacto-actions.ts). Usa `ct_ips_contrato.municipio_administracion`
+ * (municipio bajo el cual se administra CADA contrato), no
+ * `ct_ips.municipio` (municipio de registro/sede del prestador, fijo) — mismo
+ * criterio ya corregido en el Módulo 2, ver KnowledgeBase/04-BaseDatos/Tablas.md.
+ */
+export interface OpcionContratoPrestador {
+  numeroContrato: string;
+  municipioCodigo: string;
+  municipioNombre: string;
+}
+
 export interface FiltrosImpacto {
   tipo: TipoImpacto;
   anio: number;
   ips?: number | null;
   municipioCodigo?: string | null;
-  numeroContrato?: string | null;
+  /**
+   * Uno o varios números de contrato. Nota importante: cuando ya se filtra
+   * por `ips`, elegir 1 o varios contratos de ESE MISMO prestador no cambia
+   * el valor radicado — los RIPS se atribuyen por `codigo_prestador` (la
+   * entidad/sede facturadora), no por contrato individual; un prestador con
+   * varios contratos vigentes comparte el mismo `codigo_prestador` en la
+   * enorme mayoría de los casos. Este filtro sirve para acotar el universo de
+   * prestadores cuando NO hay `ips` elegido (selección EPS-completa por
+   * contrato) y, con `ips` elegido, para mostrar en qué municipio(s) de
+   * administración opera (ver `OpcionContratoPrestador`) — no para
+   * sub-filtrar sus propios RIPS.
+   */
+  numerosContrato?: string[] | null;
 }
 
 /** Una fila del ranking Top 100 (o del universo completo de códigos, antes de recortar a 100). */
@@ -118,4 +145,49 @@ export interface ResultadoTopImpacto {
   top20Codigos: FilaTopImpacto[];
   top20Prestadores: FilaImpactoPrestador[];
   top20Municipios: FilaImpactoMunicipio[];
+}
+
+/**
+ * Drill-down "de lo general a lo particular" (pedido del usuario 2026-07-30:
+ * "si yo le doy doble clic en Top 20 prestadores por valor radicado a un
+ * prestador mostrarme de que servicios viene ese dinero... y llevarme por
+ * doble clic a una información más detallada hasta las facturas"). 2 niveles:
+ *
+ * - Nivel 2 (prestador → códigos): NO requiere un tipo nuevo — reutiliza
+ *   `ResultadoTopImpacto` completo, llamando de nuevo a `getTopImpacto` con
+ *   los mismos filtros ya usados para el gráfico (`resultado.filtros`) pero
+ *   sobrescribiendo `ips` con el prestador de la barra. Esto garantiza que el
+ *   total mostrado en el desglose coincida EXACTO con el valor de la barra,
+ *   sin importar qué haya cambiado el usuario en los selectores después de
+ *   consultar.
+ * - Nivel 3 (código → facturas): sí requiere un tipo/consulta nueva, ver
+ *   `FilaFacturaImpacto`/`ResultadoFacturasImpacto` y `getFacturasCodigoImpacto`
+ *   en `top-impacto-actions.ts`. No se reutiliza `getMovimientoRipsCodigo`
+ *   (módulo "Movimientos RIPS") porque ese acota las facturas por VIGENCIA de
+ *   contrato del prestador (no por el año elegido en este módulo) y no
+ *   soporta el tipo "consultas" — hubiera dado un total inconsistente con el
+ *   que ya se ve en el Nivel 2/gráfico de este módulo.
+ */
+export interface FilaFacturaImpacto {
+  numeroFactura: string;
+  fecha: string | null;
+  /** Para "servicios"/"consultas": `COUNT(*)` (cada fila del RIPS es un evento, sin columna de unidades propia — mismo criterio que `obtenerPorCodigo`). Para "medicamentos"/"insumos": suma de unidades/cantidad física real. */
+  cantidad: number;
+  valor: number;
+}
+
+export interface ResultadoFacturasImpacto {
+  ips: number;
+  razonSocial: string;
+  codigoPrestador: string;
+  codigo: string;
+  descripcion: string;
+  tipo: Exclude<TipoImpacto, "todos">;
+  anio: number;
+  /** Calculados sobre TODAS las facturas encontradas, no solo las mostradas (mismo criterio que `ResultadoMovimientoRips`). */
+  totalCantidad: number;
+  totalValor: number;
+  totalFacturas: number;
+  /** Acotado a las más recientes (ver `LIMITE_FACTURAS_IMPACTO` en el Server Action) — los totales de arriba sí incluyen todas. */
+  facturas: FilaFacturaImpacto[];
 }

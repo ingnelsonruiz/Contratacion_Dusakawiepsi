@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import FileSpreadsheet from "lucide-react/icons/file-spreadsheet";
 import FileDown from "lucide-react/icons/file-down";
 import ArrowDownUp from "lucide-react/icons/arrow-down-up";
@@ -8,23 +9,34 @@ import Trophy from "lucide-react/icons/trophy";
 import Coins from "lucide-react/icons/coins";
 import ListChecks from "lucide-react/icons/list-checks";
 import Hash from "lucide-react/icons/hash";
+import X from "lucide-react/icons/x";
+import Loader2 from "lucide-react/icons/loader-2";
 
+import Search from "lucide-react/icons/search";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
 import { Paginacion } from "@/components/tarifarios/paginacion";
-import { formatearMoneda, formatearPorcentaje } from "@/lib/negociacion/formato";
+import { formatearMoneda, formatearPorcentaje, formatearFecha } from "@/lib/negociacion/formato";
 import { ETIQUETAS_TIPO_IMPACTO } from "@/lib/negociacion/top-impacto";
-import { getOpcionesFiltrosImpacto, getTopImpacto } from "@/app/actions/top-impacto-actions";
+import {
+  getOpcionesFiltrosImpacto,
+  getTopImpacto,
+  getContratosPrestador,
+  getFacturasCodigoImpacto,
+} from "@/app/actions/top-impacto-actions";
 import type {
   TipoImpacto,
   OpcionesFiltrosImpacto,
+  OpcionContratoPrestador,
   ResultadoTopImpacto,
   FilaTopImpacto,
   FilaImpactoPrestador,
   FilaImpactoMunicipio,
+  ResultadoFacturasImpacto,
 } from "@/types/top-impacto";
 
 const PAGE_SIZE = 25;
@@ -79,19 +91,41 @@ function TarjetaKpi({ etiqueta, valor, sub, icono: Icono }: { etiqueta: string; 
  * limpia en este sandbox, ver KnowledgeBase/09-Errores §12; el resto del
  * proyecto ya resuelve gráficos simples con SVG/HTML propio en vez de
  * reintentarlo).
+ *
+ * `onDoubleClickItem` (opcional, pedido del usuario 2026-07-30 — drill-down
+ * "de lo general a lo particular"): si se pasa, cada barra se vuelve
+ * clickeable (doble clic) y reporta el índice dentro de `datos` para que el
+ * llamador resuelva la fila original (`FilaImpactoPrestador`, etc.) — este
+ * componente solo conoce `{etiqueta, valor}`, no el objeto de dominio.
  */
-function GraficoBarras({ titulo, datos }: { titulo: string; datos: { etiqueta: string; valor: number }[] }) {
+function GraficoBarras({
+  titulo,
+  datos,
+  onDoubleClickItem,
+}: {
+  titulo: string;
+  datos: { etiqueta: string; valor: number }[];
+  onDoubleClickItem?: (indice: number) => void;
+}) {
   const maximo = Math.max(1, ...datos.map((d) => d.valor));
   return (
     <Card>
       <CardContent className="pt-6">
         <p className="mb-3 text-sm font-semibold">{titulo}</p>
+        {onDoubleClickItem ? (
+          <p className="mb-2 text-[11px] text-muted-foreground">Doble clic sobre una barra para ver el detalle.</p>
+        ) : null}
         {datos.length === 0 ? (
           <p className="py-6 text-center text-xs text-muted-foreground">Sin datos para este filtro.</p>
         ) : (
           <div className="space-y-2">
             {datos.map((d, i) => (
-              <div key={`${d.etiqueta}-${i}`} className="text-xs">
+              <div
+                key={`${d.etiqueta}-${i}`}
+                className={`text-xs ${onDoubleClickItem ? "cursor-pointer rounded-sm hover:bg-muted/60" : ""}`}
+                onDoubleClick={onDoubleClickItem ? () => onDoubleClickItem(i) : undefined}
+                title={onDoubleClickItem ? "Doble clic para ver el detalle" : undefined}
+              >
                 <div className="mb-0.5 flex items-center justify-between gap-2">
                   <span className="truncate text-muted-foreground" title={d.etiqueta}>
                     {i + 1}. {d.etiqueta}
@@ -113,6 +147,49 @@ function GraficoBarras({ titulo, datos }: { titulo: string; datos: { etiqueta: s
   );
 }
 
+/**
+ * Overlay de doble clic — mismo patrón ya usado en `perfil-prestador-client.tsx`
+ * y `dashboard-riesgo-tab.tsx` (sin librería de diálogo nueva, `createPortal`
+ * a `document.body` para poder abrirse desde dentro de las barras/filas sin
+ * quedar recortado por `overflow` ni romper el DOM si el disparador vive
+ * dentro de una tabla).
+ */
+function ModalOverlay({
+  titulo,
+  subtitulo,
+  onClose,
+  children,
+}: {
+  titulo: string;
+  subtitulo?: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const [montado, setMontado] = useState(false);
+  useEffect(() => setMontado(true), []);
+  if (!montado) return null;
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={onClose}>
+      <Card className="max-h-[85vh] w-full max-w-4xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <CardContent className="flex max-h-[85vh] flex-col gap-3 pt-6">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="font-semibold">{titulo}</p>
+              {subtitulo ? <p className="text-xs text-muted-foreground">{subtitulo}</p> : null}
+            </div>
+            <Button variant="outline" size="sm" onClick={onClose}>
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
+          <div className="overflow-y-auto">{children}</div>
+        </CardContent>
+      </Card>
+    </div>,
+    document.body
+  );
+}
+
 type ColumnaOrden = "valorTotal" | "cantidad" | "valorPromedio" | "prestadores" | "pctDelTotal";
 
 export function TopImpactoClient() {
@@ -121,14 +198,137 @@ export function TopImpactoClient() {
 
   const [tipo, setTipo] = useState<TipoImpacto>("todos");
   const [anio, setAnio] = useState<number>(new Date().getFullYear());
+  const [busquedaPrestador, setBusquedaPrestador] = useState("");
   const [ipsSeleccionado, setIpsSeleccionado] = useState<string>("");
   const [municipioCodigo, setMunicipioCodigo] = useState<string>("");
   const [numeroContrato, setNumeroContrato] = useState<string>("");
+
+  // Cascada Prestador → Contrato(s) → Municipio (pedido 2026-07-30): al elegir
+  // un prestador, se cargan SOLO sus contratos vigentes (en vez del listado
+  // completo de ~280 contratos de la EPS) y se puede marcar uno, varios o
+  // todos — el o los municipios de administración correspondientes se
+  // muestran automáticamente, sin un selector aparte.
+  const [contratosPrestador, setContratosPrestador] = useState<OpcionContratoPrestador[]>([]);
+  const [cargandoContratosPrestador, setCargandoContratosPrestador] = useState(false);
+  const [contratosSeleccionados, setContratosSeleccionados] = useState<Set<string>>(new Set());
+
+  const prestadoresFiltrados = useMemo(() => {
+    if (!opciones) return [];
+    const q = busquedaPrestador.trim().toLowerCase();
+    if (!q) return opciones.prestadores;
+    return opciones.prestadores.filter((p) => p.razonSocial.toLowerCase().includes(q) || p.nit.includes(q));
+  }, [opciones, busquedaPrestador]);
+
+  useEffect(() => {
+    if (!ipsSeleccionado) {
+      setContratosPrestador([]);
+      setContratosSeleccionados(new Set());
+      return;
+    }
+    let cancelado = false;
+    setCargandoContratosPrestador(true);
+    getContratosPrestador(Number(ipsSeleccionado))
+      .then((contratos) => {
+        if (cancelado) return;
+        setContratosPrestador(contratos);
+        // Por defecto, todos los contratos del prestador quedan marcados —
+        // equivale a "sin sub-filtro adicional", el mismo resultado que ya
+        // trae filtrar solo por `ips`.
+        setContratosSeleccionados(new Set(contratos.map((c) => c.numeroContrato)));
+      })
+      .finally(() => {
+        if (!cancelado) setCargandoContratosPrestador(false);
+      });
+    return () => {
+      cancelado = true;
+    };
+  }, [ipsSeleccionado]);
+
+  function alternarContrato(numero: string) {
+    setContratosSeleccionados((actual) => {
+      const nuevo = new Set(actual);
+      if (nuevo.has(numero)) nuevo.delete(numero);
+      else nuevo.add(numero);
+      return nuevo;
+    });
+  }
+
+  const municipiosDelPrestador = useMemo(() => {
+    const nombres = new Set(
+      contratosPrestador.filter((c) => contratosSeleccionados.has(c.numeroContrato)).map((c) => c.municipioNombre)
+    );
+    return Array.from(nombres);
+  }, [contratosPrestador, contratosSeleccionados]);
 
   const [resultado, setResultado] = useState<ResultadoTopImpacto | null>(null);
   const [cargando, setCargando] = useState(false);
   const [progreso, setProgreso] = useState(0);
   const [mensajeIdx, setMensajeIdx] = useState(0);
+
+  // Drill-down "de lo general a lo particular" (pedido 2026-07-30): Nivel 2
+  // (prestador → códigos) y Nivel 3 (código → facturas) — ver comentario
+  // completo en ResultadoTopImpacto/ResultadoFacturasImpacto, types/top-impacto.ts.
+  const [drillPrestador, setDrillPrestador] = useState<FilaImpactoPrestador | null>(null);
+  const [drillNivel2, setDrillNivel2] = useState<ResultadoTopImpacto | null>(null);
+  const [cargandoDrillNivel2, setCargandoDrillNivel2] = useState(false);
+
+  const [drillCodigo, setDrillCodigo] = useState<FilaTopImpacto | null>(null);
+  const [drillNivel3, setDrillNivel3] = useState<ResultadoFacturasImpacto | null>(null);
+  const [cargandoDrillNivel3, setCargandoDrillNivel3] = useState(false);
+
+  /**
+   * Nivel 2: se llama de nuevo a `getTopImpacto`, pero con los MISMOS
+   * filtros ya usados para calcular la barra (`resultado.filtros`, no el
+   * estado vivo de los selectores — que pudo cambiar después de consultar),
+   * sobrescribiendo solo `ips` con el prestador de la barra elegida. Así el
+   * total del desglose siempre coincide con el valor exacto de la barra.
+   */
+  async function abrirDrillPrestador(p: FilaImpactoPrestador) {
+    if (!resultado) return;
+    setDrillPrestador(p);
+    setDrillNivel2(null);
+    setDrillCodigo(null);
+    setDrillNivel3(null);
+    // "Código no registrado: <codigo>" (ver FilaImpactoPrestador.ips) — sin
+    // fila en ct_ips, no hay `ips` con el cual volver a filtrar. Se muestra
+    // igual el modal, con un mensaje explicando por qué no se puede
+    // profundizar (mismo criterio de honestidad ya documentado en
+    // `obtenerPorPrestador`: no ocultar el caso, explicarlo).
+    if (p.ips === null) return;
+    setCargandoDrillNivel2(true);
+    try {
+      const res = await getTopImpacto({ ...resultado.filtros, ips: p.ips });
+      setDrillNivel2(res);
+    } finally {
+      setCargandoDrillNivel2(false);
+    }
+  }
+
+  function cerrarDrillPrestador() {
+    setDrillPrestador(null);
+    setDrillNivel2(null);
+    setDrillCodigo(null);
+    setDrillNivel3(null);
+  }
+
+  /** Nivel 3: reutiliza los mismos filtros del Nivel 2 (año/municipio/contrato ya acotados), fijando `ips` + el código/tipo de la fila elegida. */
+  async function abrirDrillCodigo(fila: FilaTopImpacto) {
+    if (!drillPrestador || drillPrestador.ips === null || !drillNivel2) return;
+    setDrillCodigo(fila);
+    setDrillNivel3(null);
+    setCargandoDrillNivel3(true);
+    try {
+      const res = await getFacturasCodigoImpacto({ ...drillNivel2.filtros, ips: drillPrestador.ips }, fila.tipo, fila.codigo);
+      setDrillNivel3(res);
+    } finally {
+      setCargandoDrillNivel3(false);
+    }
+  }
+
+  function cerrarDrillCodigo() {
+    setDrillCodigo(null);
+    setDrillNivel3(null);
+  }
 
   const [pagina, setPagina] = useState(1);
   const [orden, setOrden] = useState<ColumnaOrden>("valorTotal");
@@ -164,6 +364,21 @@ export function TopImpactoClient() {
     return () => clearInterval(intervalo);
   }, [cargando]);
 
+  /**
+   * Lista efectiva de contratos a enviar al servidor. Con prestador elegido,
+   * son los contratos marcados en la cascada (por defecto, todos los suyos —
+   * ver nota en `FiltrosImpacto.numerosContrato` sobre por qué esto no
+   * cambia el valor radicado del prestador, solo acota qué municipio(s) de
+   * administración se muestran). Sin prestador elegido, es el selector
+   * EPS-completo de un solo contrato (comportamiento previo, sin cambios).
+   */
+  function numerosContratoEfectivos(): string[] | null {
+    if (ipsSeleccionado) {
+      return contratosSeleccionados.size > 0 ? Array.from(contratosSeleccionados) : null;
+    }
+    return numeroContrato ? [numeroContrato] : null;
+  }
+
   async function consultar() {
     setCargando(true);
     setProgreso(0);
@@ -173,8 +388,8 @@ export function TopImpactoClient() {
         tipo,
         anio,
         ips: ipsSeleccionado ? Number(ipsSeleccionado) : null,
-        municipioCodigo: municipioCodigo || null,
-        numeroContrato: numeroContrato || null,
+        municipioCodigo: ipsSeleccionado ? null : municipioCodigo || null,
+        numerosContrato: numerosContratoEfectivos(),
       });
       setResultado(res);
     } finally {
@@ -206,8 +421,9 @@ export function TopImpactoClient() {
   function urlExport(formato: "xlsx" | "csv"): string {
     const params = new URLSearchParams({ tipo, anio: String(anio), formato });
     if (ipsSeleccionado) params.set("ips", ipsSeleccionado);
-    if (municipioCodigo) params.set("municipioCodigo", municipioCodigo);
-    if (numeroContrato) params.set("numeroContrato", numeroContrato);
+    if (!ipsSeleccionado && municipioCodigo) params.set("municipioCodigo", municipioCodigo);
+    const contratos = numerosContratoEfectivos();
+    if (contratos && contratos.length > 0) params.set("numerosContrato", contratos.join(","));
     return `/api/export/top-impacto?${params.toString()}`;
   }
 
@@ -244,63 +460,142 @@ export function TopImpactoClient() {
   return (
     <div className="space-y-4">
       <Card>
-        <CardContent className="flex flex-col gap-3 pt-6 sm:flex-row sm:flex-wrap sm:items-center">
-          <Select value={tipo} onChange={(e) => setTipo(e.target.value as TipoImpacto)} className="w-64">
-            {(Object.keys(ETIQUETAS_TIPO_IMPACTO) as TipoImpacto[]).map((t) => (
-              <option key={t} value={t}>
-                {ETIQUETAS_TIPO_IMPACTO[t]}
-              </option>
-            ))}
-          </Select>
-          <Select value={String(anio)} onChange={(e) => setAnio(Number(e.target.value))} className="w-28" disabled={cargandoOpciones}>
-            {(opciones?.anios ?? [anio]).map((a) => (
-              <option key={a} value={a}>
-                {a}
-              </option>
-            ))}
-          </Select>
-          <Select
-            value={ipsSeleccionado}
-            onChange={(e) => setIpsSeleccionado(e.target.value)}
-            className="w-64"
-            disabled={cargandoOpciones}
-          >
-            <option value="">Todos los prestadores</option>
-            {(opciones?.prestadores ?? []).map((p) => (
-              <option key={p.ips} value={p.ips}>
-                {p.razonSocial} — NIT {p.nit}
-              </option>
-            ))}
-          </Select>
-          <Select
-            value={municipioCodigo}
-            onChange={(e) => setMunicipioCodigo(e.target.value)}
-            className="w-56"
-            disabled={cargandoOpciones}
-          >
-            <option value="">Todos los municipios</option>
-            {(opciones?.municipios ?? []).map((m) => (
-              <option key={m.codigo} value={m.codigo}>
-                {m.nombre}
-              </option>
-            ))}
-          </Select>
-          <Select
-            value={numeroContrato}
-            onChange={(e) => setNumeroContrato(e.target.value)}
-            className="w-56"
-            disabled={cargandoOpciones}
-          >
-            <option value="">Todos los contratos</option>
-            {(opciones?.contratos ?? []).map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </Select>
-          <Button onClick={consultar} disabled={cargando || cargandoOpciones}>
-            Consultar
-          </Button>
+        <CardContent className="flex flex-col gap-3 pt-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
+            <Select value={tipo} onChange={(e) => setTipo(e.target.value as TipoImpacto)} className="w-64">
+              {(Object.keys(ETIQUETAS_TIPO_IMPACTO) as TipoImpacto[]).map((t) => (
+                <option key={t} value={t}>
+                  {ETIQUETAS_TIPO_IMPACTO[t]}
+                </option>
+              ))}
+            </Select>
+            <Select value={String(anio)} onChange={(e) => setAnio(Number(e.target.value))} className="w-28" disabled={cargandoOpciones}>
+              {(opciones?.anios ?? [anio]).map((a) => (
+                <option key={a} value={a}>
+                  {a}
+                </option>
+              ))}
+            </Select>
+            <div className="relative w-full sm:w-64">
+              <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={busquedaPrestador}
+                onChange={(e) => setBusquedaPrestador(e.target.value)}
+                placeholder="Buscar prestador por nombre o NIT…"
+                className="pl-8"
+                disabled={cargandoOpciones}
+              />
+            </div>
+            <Select
+              value={ipsSeleccionado}
+              onChange={(e) => {
+                setIpsSeleccionado(e.target.value);
+                // Los filtros EPS-completos de municipio/contrato solo aplican
+                // sin prestador elegido — se limpian al elegir uno para no
+                // dejar un filtro invisible activo de la vista anterior.
+                setMunicipioCodigo("");
+                setNumeroContrato("");
+              }}
+              className="w-72"
+              disabled={cargandoOpciones}
+            >
+              <option value="">Todos los prestadores</option>
+              {prestadoresFiltrados.map((p) => (
+                <option key={p.ips} value={p.ips}>
+                  {p.razonSocial} — NIT {p.nit}
+                </option>
+              ))}
+            </Select>
+
+            {!ipsSeleccionado && (
+              <>
+                <Select
+                  value={municipioCodigo}
+                  onChange={(e) => setMunicipioCodigo(e.target.value)}
+                  className="w-56"
+                  disabled={cargandoOpciones}
+                >
+                  <option value="">Todos los municipios</option>
+                  {(opciones?.municipios ?? []).map((m) => (
+                    <option key={m.codigo} value={m.codigo}>
+                      {m.nombre}
+                    </option>
+                  ))}
+                </Select>
+                <Select
+                  value={numeroContrato}
+                  onChange={(e) => setNumeroContrato(e.target.value)}
+                  className="w-56"
+                  disabled={cargandoOpciones}
+                >
+                  <option value="">Todos los contratos</option>
+                  {(opciones?.contratos ?? []).map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </Select>
+              </>
+            )}
+
+            <Button onClick={consultar} disabled={cargando || cargandoOpciones}>
+              Consultar
+            </Button>
+          </div>
+
+          {ipsSeleccionado && (
+            <div className="rounded-md border bg-muted/30 p-3 text-sm">
+              {cargandoContratosPrestador ? (
+                <p className="text-xs text-muted-foreground">Cargando contratos del prestador…</p>
+              ) : contratosPrestador.length === 0 ? (
+                <p className="text-xs text-muted-foreground">Este prestador no tiene contratos vigentes con tarifario activo.</p>
+              ) : (
+                <>
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <p className="text-xs font-medium text-muted-foreground">
+                      Contrato(s) de este prestador — elija uno, varios o todos
+                    </p>
+                    <button
+                      type="button"
+                      className="text-xs font-medium text-primary hover:underline"
+                      onClick={() =>
+                        setContratosSeleccionados(
+                          contratosSeleccionados.size === contratosPrestador.length
+                            ? new Set()
+                            : new Set(contratosPrestador.map((c) => c.numeroContrato))
+                        )
+                      }
+                    >
+                      {contratosSeleccionados.size === contratosPrestador.length ? "Ninguno" : "Todos"}
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {contratosPrestador.map((c) => {
+                      const marcado = contratosSeleccionados.has(c.numeroContrato);
+                      return (
+                        <Badge
+                          key={c.numeroContrato}
+                          variant={marcado ? "default" : "outline"}
+                          className="cursor-pointer select-none"
+                          onClick={() => alternarContrato(c.numeroContrato)}
+                        >
+                          {c.numeroContrato} · {c.municipioNombre}
+                        </Badge>
+                      );
+                    })}
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Municipio{municipiosDelPrestador.length !== 1 ? "s" : ""} de administración:{" "}
+                    <strong className="text-foreground">
+                      {municipiosDelPrestador.length > 0 ? municipiosDelPrestador.join(", ") : "—"}
+                    </strong>
+                    {" · "}El valor radicado ya está filtrado por el prestador completo — marcar uno o varios contratos aquí no
+                    cambia el total, solo confirma en qué municipio(s) se administra cada contrato.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -332,7 +627,14 @@ export function TopImpactoClient() {
 
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
             <GraficoBarras titulo="Top 20 códigos de mayor impacto económico" datos={datosGraficoCodigos} />
-            <GraficoBarras titulo="Top 20 prestadores por valor radicado" datos={datosGraficoPrestadores} />
+            <GraficoBarras
+              titulo="Top 20 prestadores por valor radicado"
+              datos={datosGraficoPrestadores}
+              onDoubleClickItem={(i) => {
+                const fila = resultado?.top20Prestadores[i];
+                if (fila) abrirDrillPrestador(fila);
+              }}
+            />
             <GraficoBarras titulo="Top 20 municipios por valor radicado" datos={datosGraficoMunicipios} />
           </div>
 
@@ -415,6 +717,133 @@ export function TopImpactoClient() {
           </CardContent>
         </Card>
       ) : null}
+
+      {/* Nivel 2 del drill-down: desglose de códigos del prestador elegido en "Top 20 prestadores". */}
+      {drillPrestador && (
+        <ModalOverlay
+          titulo={`Desglose por código — ${drillPrestador.razonSocial}`}
+          subtitulo={`${ETIQUETAS_TIPO_IMPACTO[tipo]} · Año ${resultado?.filtros.anio} · Total: ${formatearMoneda(drillPrestador.valorTotal)}`}
+          onClose={cerrarDrillPrestador}
+        >
+          {drillPrestador.ips === null ? (
+            <p className="py-8 text-center text-sm text-muted-foreground">
+              Este valor viene de un código de prestador (<span className="font-mono">{drillPrestador.razonSocial.replace("Código no registrado: ", "")}</span>)
+              que no tiene fila propia en el maestro de prestadores (<code>ct_ips</code>) — por eso no se puede volver a filtrar por él para ver su
+              desglose. Es dinero real (no un error de cálculo), pero de una sede/código de habilitación que TI todavía no ha registrado como
+              prestador — ver KnowledgeBase/04-BaseDatos/Tablas.md.
+            </p>
+          ) : cargandoDrillNivel2 ? (
+            <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Calculando desglose por código…
+            </div>
+          ) : drillNivel2 ? (
+            drillNivel2.top100.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">Sin códigos radicados para este prestador en el período filtrado.</p>
+            ) : (
+              <>
+                <p className="mb-2 text-[11px] text-muted-foreground">
+                  {drillNivel2.top100.length} código(s) · doble clic sobre una fila para ver sus facturas.
+                </p>
+                <Table>
+                  <TableHeader className="sticky top-0 z-10 bg-background">
+                    <TableRow>
+                      <TableHead>Tipo</TableHead>
+                      <TableHead>Código</TableHead>
+                      <TableHead>Descripción</TableHead>
+                      <TableHead className="text-right">Cantidad</TableHead>
+                      <TableHead className="text-right">Valor total</TableHead>
+                      <TableHead className="text-right">% del prestador</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {drillNivel2.top100.map((f) => (
+                      <TableRow
+                        key={`${f.tipo}-${f.codigo}`}
+                        className="cursor-pointer hover:bg-muted/50"
+                        onDoubleClick={() => abrirDrillCodigo(f)}
+                        title="Doble clic para ver las facturas de este código"
+                      >
+                        <TableCell>
+                          <Badge variant="outline">{ETIQUETAS_TIPO_CORTA[f.tipo]}</Badge>
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">{f.codigo}</TableCell>
+                        <TableCell className="whitespace-normal break-words">{f.descripcion}</TableCell>
+                        <TableCell className="text-right">{f.cantidad.toLocaleString("es-CO")}</TableCell>
+                        <TableCell className="text-right font-semibold">{formatearMoneda(f.valorTotal)}</TableCell>
+                        <TableCell className="text-right">{formatearPorcentaje(f.pctDelTotal, 1)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </>
+            )
+          ) : null}
+        </ModalOverlay>
+      )}
+
+      {/* Nivel 3 del drill-down: facturas del código elegido dentro del Nivel 2. */}
+      {drillCodigo && (
+        <ModalOverlay
+          titulo={`Facturas — ${drillCodigo.codigo}`}
+          subtitulo={`${drillCodigo.descripcion} · ${drillPrestador?.razonSocial ?? ""}`}
+          onClose={cerrarDrillCodigo}
+        >
+          {cargandoDrillNivel3 ? (
+            <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" /> Consultando facturas (puede tardar unos segundos)…
+            </div>
+          ) : drillNivel3 ? (
+            drillNivel3.totalFacturas === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                No se encontraron facturas para este código en el año {drillNivel3.anio}.
+              </p>
+            ) : (
+              <>
+                <div className="mb-3 grid grid-cols-3 gap-3 text-center">
+                  <div>
+                    <p className="text-xs text-muted-foreground">Total facturas</p>
+                    <p className="text-lg font-bold">{drillNivel3.totalFacturas.toLocaleString("es-CO")}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Total cantidad</p>
+                    <p className="text-lg font-bold">{drillNivel3.totalCantidad.toLocaleString("es-CO")}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Total facturado</p>
+                    <p className="text-lg font-bold">{formatearMoneda(drillNivel3.totalValor)}</p>
+                  </div>
+                </div>
+                {drillNivel3.facturas.length < drillNivel3.totalFacturas ? (
+                  <p className="mb-2 text-center text-[11px] text-muted-foreground">
+                    Mostrando las {drillNivel3.facturas.length.toLocaleString("es-CO")} facturas más recientes de{" "}
+                    {drillNivel3.totalFacturas.toLocaleString("es-CO")} en total (los totales de arriba sí incluyen todas).
+                  </p>
+                ) : null}
+                <Table>
+                  <TableHeader className="sticky top-0 z-10 bg-background">
+                    <TableRow>
+                      <TableHead>N° Factura</TableHead>
+                      <TableHead>Fecha</TableHead>
+                      <TableHead className="text-right">Cantidad</TableHead>
+                      <TableHead className="text-right">Valor</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {drillNivel3.facturas.map((f) => (
+                      <TableRow key={`${f.numeroFactura}__${f.fecha}`}>
+                        <TableCell className="font-mono text-xs">{f.numeroFactura}</TableCell>
+                        <TableCell className="text-xs">{f.fecha ? formatearFecha(f.fecha) : "—"}</TableCell>
+                        <TableCell className="text-right">{f.cantidad.toLocaleString("es-CO")}</TableCell>
+                        <TableCell className="text-right">{formatearMoneda(f.valor)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </>
+            )
+          ) : null}
+        </ModalOverlay>
+      )}
     </div>
   );
 }

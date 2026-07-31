@@ -7,6 +7,9 @@ tags: [frontend, paginas, rutas, app-router]
 ## Propósito
 Inventariar las rutas del App Router de Next.js existentes y planificadas.
 
+> [!warning] Documento parcialmente desactualizado
+> Este inventario no refleja todavía `/comparativo`, `/historico-prestador`, `/perfil-prestador`, `/consumo-frecuencia` ni `/top-impacto` (todos ✅ implementados según [[Arquitectura General#4. Módulos funcionales]] y [[Contratación]]) — quedó desactualizado desde la Fase 1. Se agrega aquí `/analisis-propuesta` (2026-07-31) sin reescribir el resto; pendiente una revisión completa de este documento.
+
 ## Rutas implementadas
 
 | Ruta | Archivo | Tipo | Protegida por middleware |
@@ -16,6 +19,8 @@ Inventariar las rutas del App Router de Next.js existentes y planificadas.
 | `/dashboard` | `src/app/(protegido)/dashboard/page.tsx` | Server Component | Sí |
 | `/tarifarios` | `src/app/(protegido)/tarifarios/page.tsx` | Server Component (lee `searchParams`) | Sí |
 | `/tarifarios/[id]` | `src/app/(protegido)/tarifarios/[id]/page.tsx` | Server Component + `TarifarioDetalleClient` (Client Component) | Sí |
+| `/analisis-propuesta` | `src/app/(protegido)/analisis-propuesta/page.tsx` | Server Component + `AnalisisPropuestaClient` (Client Component) | Sí |
+| `/precio-referencia-eps` | `src/app/(protegido)/precio-referencia-eps/page.tsx` | Server Component + `PrecioReferenciaEpsClient` (Client Component) | Sí |
 
 ### `/` — Landing pública
 Página de bienvenida con logo (`ShieldCheck`), título, descripción y botón "Ingresar" hacia `/login`. Sin lógica de servidor.
@@ -31,6 +36,12 @@ Server Component que lee `searchParams` (búsqueda, estado, tipoContrato, vigenc
 
 ### `/tarifarios/[id]` ✅
 Server Component que resuelve `params` (Next 15: `params` y `searchParams` son `Promise`), llama `getContratoDetalle()` y `getConteosTarifario()`, y renderiza: encabezado con los 8 campos del contrato (número, prestador, NIT, vigencia, valor contratado, tipo de contratación, responsable), más `<TarifarioDetalleClient>` (Client Component) con las pestañas Procedimientos/Medicamentos/Insumos (siempre visibles) y Paquetes/Otros (solo si tienen registros). Cada pestaña usa `TablaTarifario` (búsqueda con debounce, paginación en cliente vía Server Action, export Excel/CSV/impresión) — no hay recarga de página al cambiar de pestaña, de página de resultados, ni al buscar.
+
+### `/analisis-propuesta` ✅
+Server Component simple (sin `searchParams`) que renderiza `<AnalisisPropuestaClient>`. El Client Component sube el archivo de propuesta (CSV/TXT/XLSX) y el municipio vía `FormData` a la Server Action `evaluarPropuestaPrestador` (a diferencia del resto de módulos, que invocan Server Actions con argumentos planos) — ver [[API#POST /api/export/analisis-propuesta ✅ Implementado (2026-07-31)]] y [[Contratación#Nuevo módulo: Análisis de Propuesta del Prestador (2026-07-31)]].
+
+### `/precio-referencia-eps` ✅ (2026-07-31)
+Server Component simple que renderiza `<PrecioReferenciaEpsClient>`. Primera pantalla del proyecto con capacidad de escritura desde la UI: sube un archivo (Nit_prestador, Prestador, Municipio, Codigo, Descripcion, Precio — precios que OTRAS EPS pagan, no un prestador de Dusakawi) vía `cargarPreciosReferenciaEps`, y además ofrece una tabla de consulta/depuración (filtros por municipio/EPS/código, borrado individual y borrado masivo por EPS+municipio) — ver [[API#Server Actions de "Precios de Referencia EPS" (2026-07-31)]] y [[Contratación#Módulo: Precios de Referencia de Otras EPS (2026-07-31)]].
 
 ## Grupo de rutas `(protegido)`
 

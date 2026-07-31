@@ -14,7 +14,8 @@ import { Select } from "@/components/ui/select";
 import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
 import { Paginacion } from "@/components/tarifarios/paginacion";
-import { formatearMoneda } from "@/lib/negociacion/formato";
+import { formatearMoneda, formatearFecha } from "@/lib/negociacion/formato";
+import { validarRangoConsumo, MAX_DIAS_RANGO_CONSUMO } from "@/lib/negociacion/consumo-frecuencia";
 import { getOpcionesPrestadoresConsumo, getConsumoPrestador } from "@/app/actions/consumo-frecuencia-actions";
 import type { OpcionPrestadorConsumo, ResultadoConsumoPrestador, TipoConsumo } from "@/types/consumo-frecuencia";
 
@@ -26,14 +27,14 @@ const ETIQUETAS_TIPO: Record<TipoConsumo, string> = {
   insumos: "Insumo",
 };
 
-const NOMBRES_MES = [
-  "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-  "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
-];
+// El sistema tiene datos reales desde 2020 (verificado 2026-07-28) hasta hoy.
+// Acota el <input type="date"> nativo (min/max) — el navegador deshabilita en
+// su propio selector cualquier día fuera de este rango, sin validación manual.
+const FECHA_MINIMA = "2020-01-01";
 
-// El sistema tiene datos reales desde 2020 (verificado 2026-07-28) hasta el mes actual.
-const ANIO_ACTUAL = new Date().getFullYear();
-const ANIOS_DISPONIBLES = Array.from({ length: ANIO_ACTUAL - 2020 + 1 }, (_, i) => ANIO_ACTUAL - i);
+function aIso(fecha: Date): string {
+  return fecha.toISOString().slice(0, 10);
+}
 
 function TarjetaKpi({ etiqueta, valor, sub }: { etiqueta: string; valor: string; sub?: string }) {
   return (
@@ -54,16 +55,22 @@ export function ConsumoFrecuenciaClient() {
   const [codigoPrestadorSeleccionado, setCodigoPrestadorSeleccionado] = useState("");
 
   const hoy = new Date();
-  // Por defecto, el mes completo anterior — el mes en curso casi siempre
-  // está incompleto (facturación/radicación con rezago normal).
-  const mesPorDefecto = hoy.getMonth() === 0 ? 12 : hoy.getMonth();
-  const anioPorDefecto = hoy.getMonth() === 0 ? hoy.getFullYear() - 1 : hoy.getFullYear();
-  const [mes, setMes] = useState(mesPorDefecto);
-  const [anio, setAnio] = useState(anioPorDefecto);
+  // Por defecto, el mes calendario completo anterior — el mes en curso casi
+  // siempre está incompleto (facturación/radicación con rezago normal).
+  const primerDiaMesAnterior = new Date(Date.UTC(hoy.getFullYear(), hoy.getMonth() - 1, 1));
+  const ultimoDiaMesAnterior = new Date(Date.UTC(hoy.getFullYear(), hoy.getMonth(), 0));
+  const [fechaInicio, setFechaInicio] = useState(aIso(primerDiaMesAnterior));
+  const [fechaFin, setFechaFin] = useState(aIso(ultimoDiaMesAnterior));
+
+  // Única fuente de verdad del tope de rango (~3 meses) — misma función que
+  // valida en el servidor (Server Action y export), ver
+  // src/lib/negociacion/consumo-frecuencia.ts.
+  const validacionRango = useMemo(() => validarRangoConsumo(fechaInicio, fechaFin), [fechaInicio, fechaFin]);
 
   const [resultado, setResultado] = useState<ResultadoConsumoPrestador | null>(null);
   const [cargandoResultado, setCargandoResultado] = useState(false);
   const [consultado, setConsultado] = useState(false);
+  const [errorConsulta, setErrorConsulta] = useState<string | null>(null);
 
   const [filtroTipo, setFiltroTipo] = useState<"todos" | TipoConsumo>("todos");
   const [orden, setOrden] = useState<"valor_desc" | "valor_asc" | "cantidad_desc" | "cantidad_asc">("valor_desc");
@@ -82,13 +89,20 @@ export function ConsumoFrecuenciaClient() {
   }, [prestadores, busquedaPrestador]);
 
   async function consultar() {
-    if (!codigoPrestadorSeleccionado) return;
+    if (!codigoPrestadorSeleccionado || !validacionRango.valido) return;
     setCargandoResultado(true);
     setConsultado(true);
+    setErrorConsulta(null);
     setPagina(1);
     try {
-      const res = await getConsumoPrestador(codigoPrestadorSeleccionado, mes, anio);
+      const res = await getConsumoPrestador(codigoPrestadorSeleccionado, fechaInicio, fechaFin);
       setResultado(res);
+    } catch (e: any) {
+      // getConsumoPrestador valida el rango también en el servidor (defensa
+      // en profundidad) y lanza si algo no cuadra — se muestra tal cual, ya
+      // que el mensaje viene de la misma validarRangoConsumo() del cliente.
+      setResultado(null);
+      setErrorConsulta(e?.message ?? "No fue posible consultar el consumo de este prestador.");
     } finally {
       setCargandoResultado(false);
     }
@@ -118,8 +132,8 @@ export function ConsumoFrecuenciaClient() {
   function urlExport(formato: "xlsx" | "csv"): string {
     const params = new URLSearchParams({
       codigoPrestador: codigoPrestadorSeleccionado,
-      mes: String(mes),
-      anio: String(anio),
+      fechaInicio,
+      fechaFin,
       formato,
     });
     if (filtroTipo !== "todos") params.set("tipo", filtroTipo);
@@ -129,53 +143,63 @@ export function ConsumoFrecuenciaClient() {
   return (
     <div className="space-y-4">
       <Card>
-        <CardContent className="flex flex-col gap-3 pt-6 sm:flex-row sm:items-center sm:flex-wrap">
-          <div className="relative w-full sm:w-72">
-            <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={busquedaPrestador}
-              onChange={(e) => setBusquedaPrestador(e.target.value)}
-              placeholder="Buscar por nombre, NIT o código…"
-              className="pl-8"
-              disabled={cargandoPrestadores}
-            />
-          </div>
-          <Select
-            value={codigoPrestadorSeleccionado}
-            onChange={(e) => setCodigoPrestadorSeleccionado(e.target.value)}
-            className="w-72"
-            disabled={cargandoPrestadores || prestadoresFiltrados.length === 0}
-          >
-            <option value="">{cargandoPrestadores ? "Cargando prestadores…" : "Seleccione un prestador…"}</option>
-            {prestadoresFiltrados.map((p) => (
-              <option key={p.codigoPrestador} value={p.codigoPrestador}>
-                {p.razonSocial} — NIT {p.nit}
-              </option>
-            ))}
-          </Select>
-          <div className="flex items-center gap-2">
-            <CalendarDays className="h-4 w-4 text-muted-foreground" />
-            <Select value={mes} onChange={(e) => setMes(Number(e.target.value))} className="w-36">
-              {NOMBRES_MES.map((nombre, i) => (
-                <option key={nombre} value={i + 1}>
-                  {nombre}
+        <CardContent className="flex flex-col gap-3 pt-6">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:flex-wrap">
+            <div className="relative w-full sm:w-72">
+              <Search className="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={busquedaPrestador}
+                onChange={(e) => setBusquedaPrestador(e.target.value)}
+                placeholder="Buscar por nombre, NIT o código…"
+                className="pl-8"
+                disabled={cargandoPrestadores}
+              />
+            </div>
+            <Select
+              value={codigoPrestadorSeleccionado}
+              onChange={(e) => setCodigoPrestadorSeleccionado(e.target.value)}
+              className="w-72"
+              disabled={cargandoPrestadores || prestadoresFiltrados.length === 0}
+            >
+              <option value="">{cargandoPrestadores ? "Cargando prestadores…" : "Seleccione un prestador…"}</option>
+              {prestadoresFiltrados.map((p) => (
+                <option key={p.codigoPrestador} value={p.codigoPrestador}>
+                  {p.razonSocial} — NIT {p.nit}
                 </option>
               ))}
             </Select>
-            <Select value={anio} onChange={(e) => setAnio(Number(e.target.value))} className="w-24">
-              {ANIOS_DISPONIBLES.map((a) => (
-                <option key={a} value={a}>
-                  {a}
-                </option>
-              ))}
-            </Select>
+            <div className="flex items-center gap-2">
+              <CalendarDays className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <Input
+                type="date"
+                value={fechaInicio}
+                min={FECHA_MINIMA}
+                max={fechaFin}
+                onChange={(e) => e.target.value && setFechaInicio(e.target.value)}
+                className="w-36"
+                aria-label="Fecha inicial"
+              />
+              <span className="text-sm text-muted-foreground">a</span>
+              <Input
+                type="date"
+                value={fechaFin}
+                min={fechaInicio}
+                max={aIso(hoy)}
+                onChange={(e) => e.target.value && setFechaFin(e.target.value)}
+                className="w-36"
+                aria-label="Fecha final"
+              />
+            </div>
+            <Button onClick={consultar} disabled={!codigoPrestadorSeleccionado || !validacionRango.valido || cargandoResultado}>
+              Consultar
+            </Button>
+            <p className="text-xs text-muted-foreground sm:ml-auto">
+              Consumo real facturado (RIPS) — rango máximo de {MAX_DIAS_RANGO_CONSUMO} días (~3 meses) por el tamaño de las tablas RIPS.
+            </p>
           </div>
-          <Button onClick={consultar} disabled={!codigoPrestadorSeleccionado || cargandoResultado}>
-            Consultar
-          </Button>
-          <p className="text-xs text-muted-foreground sm:ml-auto">
-            Consumo real facturado (RIPS) de un solo mes — las consultas de rango abierto no están disponibles por el tamaño de las tablas RIPS.
-          </p>
+          {!validacionRango.valido && (
+            <p className="text-xs font-medium text-red-600">{validacionRango.error}</p>
+          )}
         </CardContent>
       </Card>
 
@@ -184,20 +208,24 @@ export function ConsumoFrecuenciaClient() {
           {cargandoResultado ? (
             <Card>
               <CardContent className="py-10 text-center text-sm text-muted-foreground">
-                Consultando RIPS de {NOMBRES_MES[mes - 1]} {anio}… puede tardar varios segundos (tablas de cientos de millones de filas, sin índice por fecha).
+                Consultando RIPS del {formatearFecha(fechaInicio)} al {formatearFecha(fechaFin)}… puede tardar varios segundos (tablas de cientos de millones de filas, sin índice por fecha).
               </CardContent>
+            </Card>
+          ) : errorConsulta ? (
+            <Card>
+              <CardContent className="py-10 text-center text-sm text-red-600">{errorConsulta}</CardContent>
             </Card>
           ) : resultado && resultado.filas.length === 0 ? (
             <Card>
               <CardContent className="py-10 text-center text-sm text-muted-foreground">
-                Sin consumo facturado para {resultado.razonSocial} en {NOMBRES_MES[mes - 1]} {anio}.
+                Sin consumo facturado para {resultado.razonSocial} del {formatearFecha(resultado.fechaInicio)} al {formatearFecha(resultado.fechaFin)}.
               </CardContent>
             </Card>
           ) : resultado ? (
             <>
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
                 <TarjetaKpi etiqueta="Valor total facturado" valor={formatearMoneda(resultado.kpis.valorTotalFacturado)} />
-                <TarjetaKpi etiqueta="Facturas del mes" valor={resultado.kpis.cantidadFacturas.toLocaleString("es-CO")} />
+                <TarjetaKpi etiqueta="Facturas del período" valor={resultado.kpis.cantidadFacturas.toLocaleString("es-CO")} />
                 <TarjetaKpi etiqueta="Códigos distintos" valor={resultado.kpis.cantidadCodigosDistintos.toLocaleString("es-CO")} />
                 <TarjetaKpi
                   etiqueta="Procedimientos / Medicamentos"

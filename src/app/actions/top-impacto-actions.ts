@@ -20,13 +20,17 @@
 import { pool } from "@/lib/db";
 import { CONTRATOS_EXCLUIDOS_MIGRACION } from "@/lib/negociacion/constantes";
 import { construirFilaTopImpacto, calcularKpisTopImpacto, type FilaCrudaTopImpacto } from "@/lib/negociacion/top-impacto";
+import { sqlFacturasCanonicas, joinFacturaCanonica } from "@/lib/negociacion/rips-dedup";
 import type {
   TipoImpacto,
   FiltrosImpacto,
   OpcionesFiltrosImpacto,
+  OpcionContratoPrestador,
   ResultadoTopImpacto,
   FilaImpactoPrestador,
   FilaImpactoMunicipio,
+  FilaFacturaImpacto,
+  ResultadoFacturasImpacto,
 } from "@/types/top-impacto";
 
 const SOURCE = "top-impacto";
@@ -38,7 +42,32 @@ type TipoEspecifico = Exclude<TipoImpacto, "todos">;
 
 const TABLA_TIPO: Record<
   TipoEspecifico,
-  { tabla: string; alias: string; columnaCodigo: string; columnaValor: string; catalogo: string; columnaCatalogoDescripcion: string }
+  {
+    tabla: string;
+    alias: string;
+    columnaCodigo: string;
+    columnaValor: string;
+    catalogo: string;
+    columnaCatalogoDescripcion: string;
+    /**
+     * Catálogo de respaldo cuando el código no resuelve en `catalogo` —
+     * agregado 2026-07-30 tras verificar un hallazgo real: códigos de
+     * "estancia"/habitación (ej. `108A01` "INTERNACIÓN EN UNIDAD DE CUIDADO
+     * INTENSIVO NEONATAL") son códigos CUPS reales (existen en `tb_cup`), pero
+     * ARYUWIS los reporta vía el archivo RIPS de "otros servicios" (`rips_at`,
+     * tipo "insumos" de este módulo) en vez del archivo de procedimientos
+     * (`rips_ap`). Verificado a escala EPS-completa (año 2026): de 8.288
+     * códigos distintos en `rips_at`, solo 1.091 (13%) resuelven en
+     * `tb_insumo`, pero 354 (4,3%) resuelven ÚNICAMENTE en `tb_cup` — y en
+     * valor, esos 354 códigos representan **$49.329.517.821 de $67.523.703.878
+     * (73%)** del total facturado bajo "insumos", muy por encima del 9% que sí
+     * es insumo real (`tb_insumo`). Sin este respaldo, la tabla mostraba el
+     * código repetido como descripción (`"108A01 — 108A01"`) para exactamente
+     * estos casos de alto valor.
+     */
+    catalogoFallback?: string;
+    aliasFallback?: string;
+  }
 > = {
   servicios: {
     tabla: "rips_ap",
@@ -73,7 +102,8 @@ const TABLA_TIPO: Record<
   },
   // El código real del insumo viene en `codigo_servicio`, NUNCA en
   // `codigo_tarifario` (siempre NULL) — mismo hallazgo ya documentado en
-  // Módulo 4 y en "Movimientos RIPS".
+  // Módulo 4 y en "Movimientos RIPS". Corrección 2026-07-30: se agrega
+  // `catalogoFallback: tb_cup` — ver comentario completo en el tipo de arriba.
   insumos: {
     tabla: "rips_at",
     alias: "at2",
@@ -81,6 +111,8 @@ const TABLA_TIPO: Record<
     columnaValor: "valor_total_material",
     catalogo: "tb_insumo",
     columnaCatalogoDescripcion: "descripcion",
+    catalogoFallback: "tb_cup",
+    aliasFallback: "cupFallback",
   },
 };
 
@@ -161,9 +193,9 @@ function construirFragmentoFacturas(filtros: FiltrosImpacto, codigoPrestador: st
     params.push(filtros.municipioCodigo);
     condiciones += ` AND codigo_prestador = ANY(ARRAY(SELECT codigo_prestador FROM administrativo.ct_ips WHERE municipio = $${params.length} AND codigo_prestador IS NOT NULL))`;
   }
-  if (filtros.numeroContrato) {
-    params.push(filtros.numeroContrato);
-    condiciones += ` AND codigo_prestador = ANY(ARRAY(SELECT ci.codigo_prestador FROM administrativo.ct_ips_contrato c JOIN administrativo.ct_ips ci ON ci.ips = c.ips WHERE c.numero_contrato = $${params.length} AND ci.codigo_prestador IS NOT NULL))`;
+  if (filtros.numerosContrato && filtros.numerosContrato.length > 0) {
+    params.push(filtros.numerosContrato);
+    condiciones += ` AND codigo_prestador = ANY(ARRAY(SELECT ci.codigo_prestador FROM administrativo.ct_ips_contrato c JOIN administrativo.ct_ips ci ON ci.ips = c.ips WHERE c.numero_contrato = ANY($${params.length}) AND ci.codigo_prestador IS NOT NULL))`;
   }
 
   return {
@@ -172,7 +204,16 @@ function construirFragmentoFacturas(filtros: FiltrosImpacto, codigoPrestador: st
     // extensa en `construirUnionCrudo`), con `DISTINCT ON (consecutivo_rips)`
     // para garantizar una sola fila por `consecutivo_rips` — ver nota crítica
     // arriba sobre por qué esto es obligatorio (fanout en el JOIN).
-    cte: `WITH facturas_periodo AS MATERIALIZED (SELECT DISTINCT ON (consecutivo_rips) consecutivo_rips, codigo_prestador FROM administrativo.rips_af WHERE ${condiciones} ORDER BY consecutivo_rips)`,
+    //
+    // CORRECCIÓN CRÍTICA 2026-07-30 (reportada por el usuario contra un caso
+    // real, factura MV06370): se agrega la CTE `facturas_canonicas`, que
+    // deduplica una SEGUNDA vez, ahora por factura real (`codigo_prestador` +
+    // `numero_factura`) en vez de por lote (`consecutivo_rips`) — una misma
+    // factura puede aparecer repetida en varios lotes distintos (recargas de
+    // RIPS no limpiadas), lo que multiplicaba su valor real hasta 13x en
+    // casos verificados. Ver comentario completo y magnitud EPS-completa en
+    // `src/lib/negociacion/rips-dedup.ts` y KnowledgeBase/04-BaseDatos/Tablas.md.
+    cte: `WITH facturas_periodo AS MATERIALIZED (SELECT DISTINCT ON (consecutivo_rips) consecutivo_rips, codigo_prestador FROM administrativo.rips_af WHERE ${condiciones} ORDER BY consecutivo_rips), facturas_canonicas AS MATERIALIZED (${sqlFacturasCanonicas(condiciones)})`,
     ref: "ARRAY(SELECT consecutivo_rips FROM facturas_periodo)",
     params,
   };
@@ -193,20 +234,36 @@ function construirFragmentoFacturas(filtros: FiltrosImpacto, codigoPrestador: st
  * (~4-7s, join barato porque la CTE ya está materializada y es chica).
  */
 function construirJoinFactura(alias: string): string {
-  return `JOIN facturas_periodo fp ON fp.consecutivo_rips = ${alias}.consecutivo_rips`;
+  // El 2do JOIN (`facturas_canonicas`) es el fix del 2026-07-30 — sin él, una
+  // factura recargada en varios lotes cuenta sus líneas de detalle una vez
+  // POR LOTE en vez de una sola vez. Ver `rips-dedup.ts`.
+  return `JOIN facturas_periodo fp ON fp.consecutivo_rips = ${alias}.consecutivo_rips ${joinFacturaCanonica(alias)}`;
 }
 
 async function obtenerPorCodigo(tipos: TipoEspecifico[], fragmento: FragmentoFacturas): Promise<FilaCrudaTopImpacto[]> {
   const ramas = tipos.map((t) => {
     const info = TABLA_TIPO[t];
+    // `catalogoFallback` (hoy solo "insumos" → tb_cup): si el código no
+    // resuelve en el catálogo principal, se intenta el de respaldo antes de
+    // caer en NULL — ver comentario completo en TABLA_TIPO.
+    const joinFallback = info.catalogoFallback
+      ? `LEFT JOIN administrativo.${info.catalogoFallback} ${info.aliasFallback} ON ${info.aliasFallback}.codigo_interno = ${info.alias}.${info.columnaCodigo}`
+      : "";
+    const columnaDescripcion = info.catalogoFallback
+      ? `COALESCE(cat.${info.columnaCatalogoDescripcion}, ${info.aliasFallback}.descripcion)`
+      : `cat.${info.columnaCatalogoDescripcion}`;
+    const groupByDescripcion = info.catalogoFallback
+      ? `cat.${info.columnaCatalogoDescripcion}, ${info.aliasFallback}.descripcion`
+      : `cat.${info.columnaCatalogoDescripcion}`;
     return `
-      SELECT '${t}'::text AS tipo, ${info.alias}.${info.columnaCodigo} AS codigo, cat.${info.columnaCatalogoDescripcion} AS descripcion,
+      SELECT '${t}'::text AS tipo, ${info.alias}.${info.columnaCodigo} AS codigo, ${columnaDescripcion} AS descripcion,
         COUNT(*) AS cantidad, SUM(${info.alias}.${info.columnaValor}) AS valor, COUNT(DISTINCT fp.codigo_prestador) AS prestadores
       FROM administrativo.${info.tabla} ${info.alias}
       ${construirJoinFactura(info.alias)}
       LEFT JOIN administrativo.${info.catalogo} cat ON cat.codigo_interno = ${info.alias}.${info.columnaCodigo}
+      ${joinFallback}
       WHERE ${info.alias}.consecutivo_rips = ANY(${fragmento.ref})
-      GROUP BY ${info.alias}.${info.columnaCodigo}, cat.${info.columnaCatalogoDescripcion}
+      GROUP BY ${info.alias}.${info.columnaCodigo}, ${groupByDescripcion}
     `;
   });
   const sql = `${fragmento.cte} ${ramas.join(" UNION ALL ")} ORDER BY valor DESC`;
@@ -400,6 +457,37 @@ export async function getOpcionesFiltrosImpacto(): Promise<OpcionesFiltrosImpact
   return { prestadores, municipios, contratos, anios };
 }
 
+/**
+ * Contratos vigentes de UN prestador puntual, con su municipio de
+ * administración — agregado 2026-07-30 para el selector en cascada
+ * Prestador → Contrato(s) → Municipio del cliente (pedido explícito del
+ * usuario: buscar el prestador, que los contratos mostrados sean solo los
+ * de ESE prestador, y que el municipio se muestre automáticamente según el
+ * o los contratos elegidos). Usa `municipio_administracion`, no
+ * `ct_ips.municipio` — mismo criterio ya corregido en el Módulo 2 (ver
+ * KnowledgeBase/04-BaseDatos/Tablas.md, hallazgo 2026-07-30).
+ */
+export async function getContratosPrestador(ips: number): Promise<OpcionContratoPrestador[]> {
+  const sql = `
+    SELECT DISTINCT c.numero_contrato, c.municipio_administracion AS municipio_codigo, mun.descripcion AS municipio_nombre
+    FROM administrativo.ct_ips_contrato c
+    JOIN administrativo.tb_municipio mun ON mun.municipio = c.municipio_administracion
+    WHERE c.ips = $1
+      AND c.sw_activo = 1
+      AND c.fecha_anula IS NULL
+      AND c.numero_contrato != ALL($2)
+      AND c.fecha_inicio <= CURRENT_DATE AND c.fecha_terminacion >= CURRENT_DATE
+    ORDER BY c.numero_contrato ASC
+  `;
+  const result = await pool.query(sql, [ips, CONTRATOS_EXCLUIDOS_MIGRACION], `${SOURCE}/contratos-prestador`);
+  const rows: any[] = result?.rows ?? [];
+  return rows.map((r) => ({
+    numeroContrato: r.numero_contrato,
+    municipioCodigo: r.municipio_codigo,
+    municipioNombre: r.municipio_nombre,
+  }));
+}
+
 // -----------------------------------------------------------------------
 // Consulta principal
 // -----------------------------------------------------------------------
@@ -445,4 +533,148 @@ export async function getTopImpacto(filtros: FiltrosImpacto): Promise<ResultadoT
   const kpis = calcularKpisTopImpacto(todasLasFilas, valorTotalRadicado, totalRegistros);
 
   return { filtros, kpis, top100, top20Codigos, top20Prestadores, top20Municipios };
+}
+
+// -----------------------------------------------------------------------
+// Drill-down "de lo general a lo particular" (2026-07-30) — Nivel 3
+// -----------------------------------------------------------------------
+
+/** Cuántas facturas como máximo se envían al cliente (las más recientes) — mismo criterio y mismo número que `movimiento-rips-actions.ts` (LIMITE_FACTURAS_MOSTRADAS). */
+const LIMITE_FACTURAS_IMPACTO = 500;
+
+/**
+ * Columna de fecha por tipo — mismo nombre ya verificado y usado en
+ * `movimiento-rips-actions.ts` para servicios/medicamentos/insumos
+ * (`fecha_procedimiento`/`fecha_dispensacion`/`fecha_atencion`). Para
+ * "consultas" (`rips_ac`) se usa `fecha_consulta`, siguiendo la misma
+ * convención de nombre "fecha_<evento del archivo RIPS>" que las otras 3
+ * tablas — consistente con el estándar RIPS (Resolución 3374/2000, archivo
+ * tipo AC) y con `codigo_consulta`/`valor_consulta` ya usados en
+ * `TABLA_TIPO.consultas` de este mismo archivo.
+ *
+ * ⚠️ A diferencia de las otras 3 columnas (verificadas contra la BD real en
+ * `movimiento-rips-actions.ts`), `fecha_consulta` para `rips_ac` NO se pudo
+ * re-verificar contra `information_schema.columns` en esta sesión — el
+ * entorno de ejecución no tuvo salida de red hacia el proxy (`pg-proxy.onrender.com`)
+ * en el momento de escribir esta función. Verificar contra la BD real (o con
+ * el primer uso real en producción) antes de confiar en el detalle de
+ * facturas de "consultas" en este drill-down.
+ */
+const COLUMNA_FECHA_TIPO: Record<TipoEspecifico, string> = {
+  servicios: "fecha_procedimiento",
+  consultas: "fecha_consulta",
+  medicamentos: "fecha_dispensacion",
+  insumos: "fecha_atencion",
+};
+
+/** "servicios"/"consultas" no tienen columna de unidades propia — cada fila es un evento (`COUNT(*)`, mismo criterio que `obtenerMovimientoServicios`). "medicamentos"/"insumos" sí la tienen. */
+const EXPRESION_CANTIDAD_TIPO: Record<TipoEspecifico, string> = {
+  servicios: "COUNT(*)",
+  consultas: "COUNT(*)",
+  medicamentos: "SUM(am.numero_unidades)",
+  insumos: "SUM(at2.cantidad)",
+};
+
+/**
+ * Detalle factura-por-factura de UN código, para UN prestador puntual, ya
+ * acotado por los mismos filtros (año, municipio, contrato) con los que se
+ * calculó el Nivel 2 — pedido del usuario 2026-07-30: "llevarme por doble
+ * clic a una información más detallada hasta las facturas". Reutiliza
+ * `construirFragmentoFacturas` (misma CTE año-acotada del resto del módulo)
+ * en vez de la vigencia de contrato que usa `getMovimientoRipsCodigo` — así
+ * el total de este Nivel 3 es coherente con el Nivel 2/el gráfico, que
+ * también están acotados por año, no por vigencia.
+ */
+export async function getFacturasCodigoImpacto(
+  filtros: FiltrosImpacto,
+  tipo: TipoEspecifico,
+  codigo: string
+): Promise<ResultadoFacturasImpacto> {
+  if (!filtros.ips) {
+    throw new Error("Se requiere un prestador (ips) para consultar el detalle de facturas.");
+  }
+
+  const infoResult = await pool.query(
+    `SELECT codigo_prestador, razon_social FROM administrativo.ct_ips WHERE ips = $1 LIMIT 1`,
+    [filtros.ips],
+    `${SOURCE}/info-prestador-facturas`
+  );
+  const info = infoResult?.rows?.[0];
+  const codigoPrestador: string | null = info?.codigo_prestador ?? null;
+  const razonSocial = info?.razon_social ?? "Prestador";
+
+  if (!codigoPrestador) {
+    return {
+      ips: filtros.ips,
+      razonSocial,
+      codigoPrestador: "",
+      codigo,
+      descripcion: codigo,
+      tipo,
+      anio: filtros.anio,
+      totalCantidad: 0,
+      totalValor: 0,
+      totalFacturas: 0,
+      facturas: [],
+    };
+  }
+
+  const fragmento = construirFragmentoFacturas(filtros, codigoPrestador);
+  const info2 = TABLA_TIPO[tipo];
+  const params = [...fragmento.params, codigo];
+  const idxCodigo = params.length;
+
+  const joinFallback = info2.catalogoFallback
+    ? `LEFT JOIN administrativo.${info2.catalogoFallback} fb ON fb.codigo_interno = ${info2.alias}.${info2.columnaCodigo}`
+    : "";
+  const columnaDescripcion = info2.catalogoFallback
+    ? `COALESCE(cat.${info2.columnaCatalogoDescripcion}, fb.descripcion)`
+    : `cat.${info2.columnaCatalogoDescripcion}`;
+  const columnaFecha = COLUMNA_FECHA_TIPO[tipo];
+
+  // `joinFacturaCanonica` (fix 2026-07-30): sin esto, una factura recargada
+  // en varios lotes aparecería MÚLTIPLES VECES en esta lista (una fila por
+  // lote) con cantidad/valor inflados — ver rips-dedup.ts y el caso real
+  // verificado (MV06370: $850.000 mostrados vs. $170.000 reales, 5 lotes).
+  const sql = `
+    ${fragmento.cte}
+    SELECT ${info2.alias}.numero_factura AS numero_factura, ${info2.alias}.${columnaFecha} AS fecha,
+      ${EXPRESION_CANTIDAD_TIPO[tipo]} AS cantidad, SUM(${info2.alias}.${info2.columnaValor}) AS valor,
+      MAX(${columnaDescripcion}) AS descripcion
+    FROM administrativo.${info2.tabla} ${info2.alias}
+    ${joinFacturaCanonica(info2.alias)}
+    LEFT JOIN administrativo.${info2.catalogo} cat ON cat.codigo_interno = ${info2.alias}.${info2.columnaCodigo}
+    ${joinFallback}
+    WHERE ${info2.alias}.${info2.columnaCodigo} = $${idxCodigo}
+      AND ${info2.alias}.consecutivo_rips = ANY(${fragmento.ref})
+    GROUP BY ${info2.alias}.numero_factura, ${info2.alias}.${columnaFecha}
+    ORDER BY ${info2.alias}.${columnaFecha} DESC NULLS LAST
+  `;
+  const result = await pool.query(sql, params, `${SOURCE}/facturas-codigo`);
+  const rows: any[] = result?.rows ?? [];
+
+  const todas: FilaFacturaImpacto[] = rows.map((r) => ({
+    numeroFactura: r.numero_factura,
+    fecha: r.fecha,
+    cantidad: Number(r.cantidad ?? 0),
+    valor: Number(r.valor ?? 0),
+  }));
+  const descripcion = rows.find((r) => r.descripcion)?.descripcion ?? codigo;
+  const totalCantidad = todas.reduce((acc, f) => acc + f.cantidad, 0);
+  const totalValor = todas.reduce((acc, f) => acc + f.valor, 0);
+  const facturas = todas.slice(0, LIMITE_FACTURAS_IMPACTO);
+
+  return {
+    ips: filtros.ips,
+    razonSocial,
+    codigoPrestador,
+    codigo,
+    descripcion,
+    tipo,
+    anio: filtros.anio,
+    totalCantidad,
+    totalValor,
+    totalFacturas: todas.length,
+    facturas,
+  };
 }

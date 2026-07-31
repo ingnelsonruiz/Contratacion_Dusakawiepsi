@@ -37,7 +37,9 @@
               "type": "file-explorer",
               "state": {
                 "sortOrder": "alphabetical",
-                "autoReveal": false
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
               },
               "icon": "lucide-folder-closed",
               "title": "Explorador de archivos"
@@ -178,17 +180,17 @@
   },
   "active": "c030b56668143309",
   "lastOpenFiles": [
+    "02-Backend/API.md.tmp.13064.2dd41c321ca0",
+    "02-Backend/API.md.tmp.33244.584a1dfb7f71",
+    "04-BaseDatos/Tablas.md.tmp.22520.35c07eab43e5",
+    "05-ReglasNegocio/Contratación.md.tmp.22032.e1d2bddc7ce5",
+    "03-Frontend/Páginas.md.tmp.22032.f50f70e9eaf9",
+    "05-ReglasNegocio/Contratación.md.tmp.27760.31b9c9c0dfbe",
+    "02-Backend/API.md.tmp.43020.d39591149d6c",
+    "05-ReglasNegocio/Contratación.md.tmp.43020.75c3e1d71916",
     "04-BaseDatos/Tablas.md.tmp.12244.c248be228274",
     "05-ReglasNegocio/Contratación.md.tmp.27460.e8989f22eebf",
     "02-Backend/API.md.tmp.41592.39a685599353",
-    "05-ReglasNegocio/Contratación.md.tmp.41592.9f038f8f2728",
-    "02-Backend/API.md.tmp.41412.15bb9e7f277e",
-    "05-ReglasNegocio/Contratación.md.tmp.17852.acd89d7e98b3",
-    "09-Errores/Problemas Comunes.md.tmp.1948.2ce21c1a836d",
-    "05-ReglasNegocio/Contratación.md.tmp.13952.a06ab4f9b24d",
-    "05-ReglasNegocio/Contratación.md.tmp.42468.7cb8fc384430",
-    "02-Backend/API.md.tmp.34200.ff8f840c17bf",
-    "05-ReglasNegocio/Contratación.md.tmp.17860.6c8c44945093",
     "05-ReglasNegocio/Validaciones.md",
     "02-Backend/Middleware.md",
     "07-Integraciones/Servicios.md",

@@ -59,3 +59,19 @@ export const CONFIG_TIPO_TARIFARIO: Record<"servicios" | "medicamentos" | "insum
     aliasMaestro: "mtr",
   },
 };
+
+/**
+ * Tamaño máximo de archivo aceptado por el módulo "Análisis de Propuesta del
+ * Prestador" — defensivo, no una regla de negocio (evita cargar en memoria un
+ * archivo desproporcionado). Debe ser coherente con
+ * `experimental.serverActions.bodySizeLimit` en next.config.ts.
+ *
+ * Vive aquí (sin "use server") y no en analisis-propuesta-actions.ts por el
+ * mismo motivo que CONTRATOS_EXCLUIDOS_MIGRACION más arriba: un archivo con
+ * "use server" solo puede exportar funciones async — exportar esta constante
+ * desde ahí rompe el build con "A 'use server' file can only export async
+ * functions, found number" (mismo bug documentado en KnowledgeBase/09-Errores/
+ * Problemas Comunes.md #11, esta vez con una constante numérica en vez de un
+ * array).
+ */
+export const TAMANO_MAXIMO_ARCHIVO_BYTES = 8 * 1024 * 1024; // 8 MB

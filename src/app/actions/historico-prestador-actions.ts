@@ -149,8 +149,14 @@ async function obtenerVigente(ips: number): Promise<Map<string, ValorConContrato
  * por código (`codigo_tarifa` = `<maestro>.codigo_interno`), nunca por FK.
  * Prioridad si un código calzara en más de un maestro (no debería pasar en
  * la práctica): servicios > medicamentos > insumos > otros.
+ *
+ * Exportada (2026-07-31) para que analisis-propuesta-actions.ts la reutilice
+ * tal cual — mismo criterio de reuso ya establecido con
+ * `construirGruposTodosMunicipios` (dashboard-riesgo-actions.ts, reutilizada
+ * por perfil-prestador-actions.ts): no se duplica la clasificación de
+ * códigos en un tercer lugar.
  */
-async function clasificarCodigos(codigos: string[]): Promise<Map<string, { tipo: TipoTarifaHistorico; descripcion: string | null }>> {
+export async function clasificarCodigos(codigos: string[]): Promise<Map<string, { tipo: TipoTarifaHistorico; descripcion: string | null }>> {
   const resultado = new Map<string, { tipo: TipoTarifaHistorico; descripcion: string | null }>();
   if (codigos.length === 0) return resultado;
 

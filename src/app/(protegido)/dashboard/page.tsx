@@ -8,9 +8,11 @@ import History from "lucide-react/icons/history";
 import UserSearch from "lucide-react/icons/user-search";
 import Activity from "lucide-react/icons/activity";
 import Trophy from "lucide-react/icons/trophy";
+import UploadCloud from "lucide-react/icons/upload-cloud";
 import TrendingDown from "lucide-react/icons/trending-down";
 import FlaskConical from "lucide-react/icons/flask-conical";
 import Globe from "lucide-react/icons/globe";
+import Landmark from "lucide-react/icons/landmark";
 
 const MODULOS = [
   {
@@ -54,6 +56,20 @@ const MODULOS = [
     descripcion: "Ranking de los 100 códigos (CUPS/CUM/Insumos) de mayor valor radicado — en qué enfocarse en la próxima negociación.",
     estado: "Disponible",
     href: "/top-impacto",
+  },
+  {
+    icono: UploadCloud,
+    titulo: "Análisis de Propuesta Prestador",
+    descripcion: "Suba el archivo de tarifas que ofrece un prestador y compárelo contra la mediana del municipio: quién más lo presta y sus ofertas más favorables.",
+    estado: "Disponible",
+    href: "/analisis-propuesta",
+  },
+  {
+    icono: Landmark,
+    titulo: "Precios de Referencia de Otras EPS",
+    descripcion: "Alimente y consulte precios que otras EPS pagan por código en cada municipio — se cruzan automáticamente con Análisis de Propuesta Prestador.",
+    estado: "Disponible",
+    href: "/precio-referencia-eps",
   },
   {
     icono: TrendingDown,

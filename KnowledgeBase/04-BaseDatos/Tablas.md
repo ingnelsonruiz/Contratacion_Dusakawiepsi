@@ -45,6 +45,48 @@ CREATE TABLE IF NOT EXISTS administrativo.negociacion_contratacion_usuario (
 
 Ver índice en [[Índices]].
 
+## Tabla implementada: `negociacion_contratacion_precio_referencia_eps` (2026-07-31)
+
+> [!warning] Estado de despliegue
+> DDL escrito e **idempotente**, y **no aplicado en la base de datos todavía** por defecto. A diferencia de `negociacion_contratacion_usuario` (que solo se puede aplicar manualmente con `psql`/DBeaver), esta SÍ tiene una vía desde la propia UI: la pantalla `/precio-referencia-eps` detecta si la tabla existe (`verificarTablaPrecioReferenciaEps`) y, si no, muestra un botón **"Aplicar migración"** (solo visible/ejecutable para rol `admin`, ver `aplicarMigracionPrecioReferenciaEps` en [[API#Server Actions de "Precios de Referencia EPS" (2026-07-31)]]) que ejecuta este mismo DDL sentencia por sentencia. Sigue siendo válido aplicarla manualmente si se prefiere. Hasta que se aplique por cualquiera de las dos vías, la carga de archivos de este módulo fallará contra la BD real con un error de tabla inexistente (comportamiento esperado, no un bug).
+
+Archivo: `db/migrations/002_precio_referencia_eps.sql`. Nace del pedido del usuario: alimentar una tabla propia con precios que **otras EPS** (no prestadores/IPS) pagan por un código en un municipio dado, para (1) compararlos contra la propuesta de un prestador en el módulo "Análisis de Propuesta Prestador" y (2) citarlos en la contrapropuesta. Distinta de `negociacion_contratacion_benchmark_mercado` (tabla planificada más abajo, reservada para fuentes públicas de ingesta batch tipo SISMED/datos.gov.co) — esta es alimentada manualmente por el analista vía archivo, con su propia UI de carga/consulta.
+
+```sql
+CREATE TABLE IF NOT EXISTS administrativo.negociacion_contratacion_precio_referencia_eps (
+    id                  BIGSERIAL PRIMARY KEY,
+    nit_entidad         VARCHAR(20)   NOT NULL,
+    nombre_entidad      VARCHAR(200)  NOT NULL,
+    municipio_codigo    VARCHAR(10)   NOT NULL,
+    municipio_nombre    VARCHAR(150)  NOT NULL,
+    codigo              VARCHAR(50)   NOT NULL,
+    descripcion         TEXT          NOT NULL,
+    precio              NUMERIC(14,2) NOT NULL,
+    usuario_grabado     VARCHAR(100),
+    fecha_grabado       TIMESTAMP     NOT NULL DEFAULT now(),
+    fecha_actualizado   TIMESTAMP     NOT NULL DEFAULT now(),
+    CONSTRAINT chk_negociacion_contratacion_precio_referencia_eps_precio CHECK (precio > 0),
+    CONSTRAINT uq_negociacion_contratacion_precio_referencia_eps UNIQUE (nit_entidad, municipio_codigo, codigo)
+);
+```
+
+| Columna | Tipo | Restricción | Descripción |
+|---|---|---|---|
+| `id` | `BIGSERIAL` | `PRIMARY KEY` | Identificador autoincremental |
+| `nit_entidad` | `VARCHAR(20)` | `NOT NULL` | NIT de la EPS/entidad pagadora de referencia (columna "Nit_prestador" del archivo fuente del usuario — nombre heredado, aunque identifica una EPS, no un prestador/IPS) |
+| `nombre_entidad` | `VARCHAR(200)` | `NOT NULL` | Razón social de la EPS (columna "Prestador" del archivo fuente) |
+| `municipio_codigo` | `VARCHAR(10)` | `NOT NULL` | Código DANE (`tb_municipio.municipio`), **resuelto en la carga** a partir del texto libre de la columna "Municipio" del archivo — nunca se confía en el texto libre como dimensión de cruce (mismo criterio que el resto del proyecto: comparar siempre por código DANE, no por nombre) |
+| `municipio_nombre` | `VARCHAR(150)` | `NOT NULL` | Texto tal como venía en el archivo original — solo para auditoría/trazabilidad |
+| `codigo` | `VARCHAR(50)` | `NOT NULL` | Código CUPS/CUM/insumo, tal como lo reporta la EPS de origen — se cruza por igualdad de texto contra `FilaEvaluacionPropuesta.codigo`, sin volver a clasificar contra tb_cup/tb_medicamento/tb_insumo (la descripción ya viene dada en el archivo) |
+| `descripcion` | `TEXT` | `NOT NULL` | Descripción del código, tal como la reporta la EPS de origen |
+| `precio` | `NUMERIC(14,2)` | `NOT NULL`, `CHECK > 0` | Precio reportado por esa EPS para ese código en ese municipio |
+| `usuario_grabado` / `fecha_grabado` | — | — | Auditoría: quién y cuándo se creó la fila (convención transversal del esquema) |
+| `fecha_actualizado` | `TIMESTAMP` | `NOT NULL DEFAULT now()` | Se actualiza en cada UPSERT — permite saber qué tan reciente es cada precio de referencia |
+
+**Upsert, no historial**: la restricción `UNIQUE (nit_entidad, municipio_codigo, codigo)` hace que volver a cargar el mismo archivo (o una versión corregida/actualizada) actualice el precio existente en vez de duplicar la fila — se prioriza tener SIEMPRE el precio más reciente conocido por combinación EPS+municipio+código, no un historial de cambios (a diferencia de, por ejemplo, `negociacion_contratacion_snapshot_tarifario` planificada más abajo, que si es explícitamente versionada).
+
+Ver también [[Contratación#Módulo: Precios de Referencia de Otras EPS (2026-07-31)]].
+
 ## Tablas planificadas (esquema `administrativo`, prefijo `negociacion_contratacion_`)
 
 Ninguna tiene DDL escrito todavía — diseño conceptual documentado en `docs/ARQUITECTURA.md` §3.2.

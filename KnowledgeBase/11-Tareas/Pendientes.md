@@ -18,6 +18,7 @@ tags: [tareas, pendientes]
 1. Aplicar `db/migrations/001_negociacion_contratacion_usuario.sql` contra `base_sie_dusakawi` con credenciales de escritura.
 2. Ejecutar `npm run seed:admin` con `ADMIN_USERNAME`/`ADMIN_PASSWORD` para crear el primer usuario.
 3. Confirmar `PROXY_API_KEY` real en `.env.local` (no depender del fallback hardcodeado — ver [[Problemas Comunes]]).
+4. **Aplicar también `db/migrations/002_precio_referencia_eps.sql`** (2026-07-31) — bloqueante específico del módulo "Precios de Referencia de Otras EPS": sin esta tabla, la carga/consulta de ese módulo falla, y la integración con Análisis de Propuesta simplemente no encuentra referencias de mercado (falla capturada en `obtenerReferenciasMercadoEps`, no rompe el resto del análisis). Ver [[Tablas#Tabla implementada: `negociacion_contratacion_precio_referencia_eps` (2026-07-31)]].
 
 ## Módulo 1 — Tarifario Vigente e Histórico ✅ Completado (2026-07-28)
 

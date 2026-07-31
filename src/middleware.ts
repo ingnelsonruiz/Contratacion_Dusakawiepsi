@@ -34,6 +34,8 @@ export const config = {
     '/dashboard/:path*',
     '/tarifarios/:path*',
     '/comparativo/:path*',
+    '/analisis-propuesta/:path*',
+    '/precio-referencia-eps/:path*',
     '/consumo/:path*',
     '/sobrecostos/:path*',
     '/simulador/:path*',

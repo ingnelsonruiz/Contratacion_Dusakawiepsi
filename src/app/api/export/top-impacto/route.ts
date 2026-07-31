@@ -69,11 +69,15 @@ export async function GET(request: NextRequest) {
   const anio = Number(params.get("anio") ?? new Date().getFullYear());
   const ips = params.get("ips") ? Number(params.get("ips")) : null;
   const municipioCodigo = params.get("municipioCodigo") || null;
-  const numeroContrato = params.get("numeroContrato") || null;
+  // Lista separada por comas — mismo criterio que `estados` en el export de
+  // Comparativo (/api/export/comparativo). Reemplazó el `numeroContrato`
+  // único el 2026-07-30 al agregar el selector en cascada Prestador→Contrato(s).
+  const numerosContratoRaw = params.get("numerosContrato");
+  const numerosContrato = numerosContratoRaw ? numerosContratoRaw.split(",").filter(Boolean) : null;
   const formato = (params.get("formato") ?? "xlsx") as "xlsx" | "csv";
 
   try {
-    const resultado = await getTopImpacto({ tipo, anio, ips, municipioCodigo, numeroContrato });
+    const resultado = await getTopImpacto({ tipo, anio, ips, municipioCodigo, numerosContrato });
     const detalle = resultado.top100.map(mapearFila);
 
     const filasParametros = [
@@ -81,7 +85,7 @@ export async function GET(request: NextRequest) {
       { Parámetro: "Año", Valor: String(anio) },
       { Parámetro: "Prestador", Valor: ips ? String(ips) : "Todos" },
       { Parámetro: "Municipio", Valor: municipioCodigo ?? "Todos" },
-      { Parámetro: "Contrato", Valor: numeroContrato ?? "Todos" },
+      { Parámetro: "Contrato(s)", Valor: numerosContrato && numerosContrato.length > 0 ? numerosContrato.join(", ") : "Todos" },
       { Parámetro: "Valor total radicado", Valor: resultado.kpis.valorTotalRadicado.toLocaleString("es-CO") },
       { Parámetro: "Total de registros radicados", Valor: resultado.kpis.totalRegistros.toLocaleString("es-CO") },
       { Parámetro: "Total de códigos diferentes", Valor: String(resultado.kpis.totalCodigosDiferentes) },

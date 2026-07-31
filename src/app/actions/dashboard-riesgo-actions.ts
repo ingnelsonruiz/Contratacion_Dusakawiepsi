@@ -150,7 +150,10 @@ export async function construirGruposTodosMunicipios(
 
   if (filtros.municipioCodigo) {
     sqlParams.push(filtros.municipioCodigo);
-    condiciones.push(`AND ips.municipio = $${sqlParams.length}`);
+    // Corrección 2026-07-30: municipio de administración del contrato, no
+    // municipio de registro del prestador — ver nota completa más abajo en
+    // el SELECT principal de esta función.
+    condiciones.push(`AND c.municipio_administracion = $${sqlParams.length}`);
   }
   if (filtros.ips) {
     sqlParams.push(filtros.ips);
@@ -165,15 +168,34 @@ export async function construirGruposTodosMunicipios(
     condiciones.push(`AND ips.nivel_complejidad = ANY($${sqlParams.length})`);
   }
 
+  // Corrección 2026-07-30 (reportada por el usuario con datos reales: GYO
+  // MEDICAL I.P.S. S.A.S., ips 801870): esta consulta agrupaba por
+  // ips.municipio (municipio de registro/sede del prestador en ct_ips, fijo
+  // por ips), en vez de c.municipio_administracion (municipio bajo el cual
+  // se administra CADA contrato en ct_ips_contrato). Un mismo prestador puede
+  // tener contratos administrados en municipios distintos al de su sede
+  // registrada — verificado contra la BD real: GYO MEDICAL está registrado en
+  // Riohacha (44001) pero sus contratos EV-44430-2026-56 y EV-44650-2026-112
+  // se administran en Maicao (44430) y San Juan Del Cesar (44650)
+  // respectivamente. A escala de toda la BD: 91 de 279 contratos vigentes
+  // (~33%) tienen municipio_administracion distinto de ips.municipio, y la
+  // columna está poblada y válida en el 100% de los 2.692 contratos
+  // existentes (nunca NULL, siempre resuelve en tb_municipio) — no hace falta
+  // COALESCE de respaldo. Usar ips.municipio mezclaba en un mismo grupo de
+  // comparación tarifas negociadas para municipios distintos — justo el
+  // efecto que esta regla de negocio busca evitar (comparación SIEMPRE dentro
+  // del mismo municipio, ver KnowledgeBase/05-ReglasNegocio/Contratación.md).
+  // Esto también corrige la tarjeta "Municipios donde opera" de Perfil
+  // Competitivo del Prestador, que se alimenta de este mismo resultado.
   const sql = `
     SELECT
       c.ips, ips.razon_social, ips.nit, c.numero_contrato, c.consecutivo_contrato,
-      ips.municipio AS municipio_codigo, munA.descripcion AS municipio_nombre, depA.descripcion AS departamento_nombre,
+      c.municipio_administracion AS municipio_codigo, munA.descripcion AS municipio_nombre, depA.descripcion AS departamento_nombre,
       d.codigo_tarifa, ${cfg.aliasMaestro}.descripcion AS descripcion_maestro,
       d.valor, d.valor_servicio, d.valor_base, d.valor_pactado, d.porcentaje_tarifa
     FROM administrativo.ct_ips_contrato c
     JOIN administrativo.ct_ips ips ON ips.ips = c.ips
-    JOIN administrativo.tb_municipio munA ON munA.municipio = ips.municipio
+    JOIN administrativo.tb_municipio munA ON munA.municipio = c.municipio_administracion
     JOIN administrativo.tb_municipio depA ON depA.municipio = munA.departamento
     JOIN administrativo.tb_tarifario_propio_detalle d ON d.consecutivo_tarifa = c.${cfg.columnaTarifario}
     JOIN ${cfg.tablaMaestro} ${cfg.aliasMaestro} ON ${cfg.aliasMaestro}.codigo_interno = d.codigo_tarifa

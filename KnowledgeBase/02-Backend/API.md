@@ -5,7 +5,7 @@ tags: [backend, api]
 # API
 
 > [!warning] Estado actual
-> El proyecto tiene 6 **Route Handlers reales**: `GET /api/export/tarifario` (Módulo 1), `GET /api/export/comparativo` (Módulo 2), `GET /api/export/historico-prestador` (Módulo 3), `GET /api/export/consumo-frecuencia` (Módulo 4), `GET /api/export/perfil-prestador` (Perfil Competitivo del Prestador) y `GET /api/export/top-impacto` (Análisis de Códigos de Mayor Impacto Económico), todos exportación binaria Excel/CSV. El resto de operaciones de lectura/escritura sigue pasando por **Server Actions** (ver [[Servicios]]), siguiendo la convención: Server Actions para todo lo que no sea un archivo binario, Route Handlers solo para descargas. Este documento describe tanto lo existente como el diseño planificado en `docs/ARQUITECTURA.md` §2.3.
+> El proyecto tiene 7 **Route Handlers reales**: `GET /api/export/tarifario` (Módulo 1), `GET /api/export/comparativo` (Módulo 2), `GET /api/export/historico-prestador` (Módulo 3), `GET /api/export/consumo-frecuencia` (Módulo 4), `GET /api/export/perfil-prestador` (Perfil Competitivo del Prestador), `GET /api/export/top-impacto` (Análisis de Códigos de Mayor Impacto Económico) y `POST /api/export/analisis-propuesta` (Análisis de Propuesta del Prestador — el único `POST`, ver más abajo), todos exportación binaria Excel/CSV. El resto de operaciones de lectura/escritura sigue pasando por **Server Actions** (ver [[Servicios]]), siguiendo la convención: Server Actions para todo lo que no sea un archivo binario, Route Handlers solo para descargas. Este documento describe tanto lo existente como el diseño planificado en `docs/ARQUITECTURA.md` §2.3.
 
 ## Por qué Server Actions y no solo API REST
 
@@ -82,6 +82,49 @@ Reutiliza `construirGruposTodosMunicipios` y `getOpcionesPrestadoresRiesgo` (amb
 | `getFacturasCodigoImpacto(filtros, tipo, codigo)` | Agregado 2026-07-30: Nivel 3 del drill-down "de lo general a lo particular" — detalle factura por factura de un código para un prestador puntual, acotado por AÑO (no por vigencia de contrato, a diferencia de `getMovimientoRipsCodigo` de "Movimientos RIPS") y con soporte para "consultas" (que ese otro módulo no tiene). Requiere `filtros.ips`. Deduplica facturas re-radicadas en varios lotes (`facturas_canonicas`, ver [[Tablas#`rips_af` — una misma factura puede aparecer duplicada en varios lotes (`consecutivo_rips`) distintos]]). Ver [[Contratación#Drill-down "de lo general a lo particular" en Top 20 prestadores (2026-07-30)]] |
 
 No reutiliza Server Actions de otros módulos (alcance distinto: EPS-completa vs. un prestador puntual) pero SÍ reutiliza el mismo patrón de rendimiento (`rips_af` como filtro previo + `= ANY(ARRAY(subquery))` sobre las tablas RIPS grandes) ya validado en Módulo 4 y en "Movimientos RIPS". Ver metodología completa en [[Contratación#Nuevo módulo: Análisis de Códigos de Mayor Impacto Económico (2026-07-29)]].
+
+## `POST /api/export/analisis-propuesta` ✅ Implementado (2026-07-31)
+
+- **Archivo**: `src/app/api/export/analisis-propuesta/route.ts`.
+- **Único endpoint `POST` de exportación del proyecto** (todos los demás son `GET` con query params): el resultado depende de un archivo binario subido por el usuario (la propuesta de tarifas), que no puede viajar serializado en una URL. Recibe el mismo `FormData` (archivo + `municipioCodigo` + `referencia` + `alertaPct`/`criticoPct` + `formato` + `vista`) que la Server Action de la UI.
+- **Implementación**: reutiliza `evaluarPropuestaPrestador()` tal cual (la MISMA Server Action que usa la UI) — nunca recalcula la evaluación con una lógica distinta, para que el archivo descargado coincida exacto con lo visto en pantalla.
+- **Vista "completo"** (Excel, 4 hojas): "Parámetros", "Resultado por código" (mínimo/máximo/promedio/mediana/variación%/estado/conteo de prestadores/conteo de referencias de mercado EPS), "Prestadores de referencia" (detalle por código+prestador propio) y "Referencias de mercado (otras EPS)" (detalle por código+EPS, con identidad de la EPS — es de uso interno, a diferencia de la vista "contrapropuesta"). En CSV, solo la hoja "Resultado por código".
+- **Vista "contrapropuesta"** (documento de trabajo INTERNO, ya NO apto para entregar tal cual a un prestador externo — ver nota abajo): Código, Descripción, Tipo, Precio ofertado y grupos de 4 columnas dinámicos por opción — "Opción N" (valor), "Fuente Opción N" ("Contrato propio" / "Otra EPS"), "Prestador/EPS Opción N" (razón social o nombre de la EPS) y "Contrato Opción N" (número de contrato, solo si es propio) — fusionando los valores YA contratados por Dusakawi y los reportados por otras EPS que sean más económicos que la oferta (rediseño 2026-07-31, ver [[Contratación#Ubicación de la propuesta en el acordeón y contrapropuesta solo-Excel con columnas dinámicas (2026-07-31, mismo día)]]). **Nota 2026-07-31**: el diseño original de este export nunca exponía identidad de terceros; el usuario pidió explícitamente revertir eso para tener el detalle completo (número de contrato + nombre del prestador/EPS) — el archivo debe tratarse como interno y revisarse antes de compartirlo con un prestador.
+
+## Server Actions de "Análisis de Propuesta del Prestador"
+
+- **Archivo**: `src/app/actions/analisis-propuesta-actions.ts`. Solo lectura (el archivo subido nunca se persiste).
+
+| Server Action | Propósito |
+|---|---|
+| `getOpcionesMunicipiosPropuesta()` | Municipios con al menos 1 contrato vigente (no exige 2+ prestadores como `getOpcionesMunicipios` del Módulo 2 — aquí basta 1 referencia) |
+| `evaluarPropuestaPrestador(formData)` | Recibe `FormData` con el archivo (CSV/TXT/XLSX) + municipio + umbrales; parsea (`src/lib/negociacion/analisis-propuesta-parser.ts`), clasifica cada código reutilizando `clasificarCodigos()` (exportada de `historico-prestador-actions.ts` para este reuso), evalúa contra el mercado local propio (`src/lib/negociacion/analisis-propuesta.ts`) y en paralelo consulta `negociacion_contratacion_precio_referencia_eps` (función interna `obtenerReferenciasMercadoEps`, no exportada) para anexar precios de otras EPS por código+municipio |
+
+Reutiliza `obtenerInfoMunicipio` (`comparativo-actions.ts`), `dedupMejorPrecio`/`calcularEstadisticas`/`calcularVariacionPct`/`clasificarSemaforo` (`comparativo.ts`) y `CONFIG_TIPO_TARIFARIO`/`CONTRATOS_EXCLUIDOS_MIGRACION` (`constantes.ts`) — no duplica ninguna consulta ni regla de semáforo ya validada. Ver metodología completa en [[Contratación#Nuevo módulo: Análisis de Propuesta del Prestador (2026-07-31)]].
+
+## `GET /api/export/precio-referencia-eps/plantilla` ✅ Implementado (2026-07-31)
+
+- **Archivo**: `src/app/api/export/precio-referencia-eps/plantilla/route.ts`. Pedido del usuario: *"que me permita descargar la hoja de excel con el formato para subir el archivo así el operador no tendrá que memorizar la estructura, solo bajar la hoja y a alimentarla"*.
+- **`GET` sin parámetros** — a diferencia del resto de exports del proyecto (que dependen de un análisis previo), esta plantilla es siempre la misma estructura fija. Botón "Descargar plantilla (Excel)" en `/precio-referencia-eps`, implementado como `<a href=".../plantilla" download>` envuelto en `<Button asChild>` (mismo patrón que `Paginacion` para enlaces, no requiere `fetch`+`blob` porque no depende de `FormData`).
+- **3 hojas**: "Instrucciones" (columnas requeridas, cómo se resuelve el municipio, recordatorio de borrar las filas de ejemplo), "Plantilla" (encabezados exactos + 2 filas de ejemplo con los datos reales del pedido original del usuario) y "Municipios válidos" (consulta en vivo `obtenerCatalogoMunicipios()` — la lista exacta de nombres que el parser podrá resolver, para que el operador no escriba un nombre de municipio que luego rebote como "no resuelto"). Si la consulta de municipios falla, la plantilla se genera igual sin esa hoja (degradación defensiva, no bloquea la descarga).
+
+## Server Actions de "Precios de Referencia EPS" (2026-07-31)
+
+- **Archivo**: `src/app/actions/precio-referencia-eps-actions.ts`. **Primer módulo de este proyecto que ESCRIBE datos cargados por el usuario** (el resto son 100% solo lectura contra las tablas SIE) — persiste en `administrativo.negociacion_contratacion_precio_referencia_eps` (tabla con DDL escrito pero **aún no aplicada** en la BD real, ver [[Tablas#Tabla implementada: `negociacion_contratacion_precio_referencia_eps` (2026-07-31)]]).
+
+| Server Action | Propósito |
+|---|---|
+| `verificarTablaPrecioReferenciaEps()` | Consulta liviana a `information_schema.tables` — si la tabla aún no existe, la UI muestra el banner de migración pendiente en vez de esperar a que una carga/listado falle primero |
+| `aplicarMigracionPrecioReferenciaEps()` | **Botón "Aplicar migración" en la propia UI** (2026-07-31) — ejecuta el DDL de `db/migrations/002_precio_referencia_eps.sql` sentencia por sentencia (`CREATE TABLE`, 2× `CREATE INDEX`, `COMMENT ON TABLE`, cada una `IF NOT EXISTS`/idempotente). Restringido a rol `admin` vía `tieneRolMinimo` (`src/lib/auth.ts`) — primera Server Action del proyecto que exige ese gate. Las sentencias van una por una (no el script completo con `BEGIN/COMMIT`) porque el proxy HTTP puede usar el protocolo "extended query" al recibir `params` (aunque sea `[]`), que solo admite una sentencia por llamada |
+| `obtenerCatalogoMunicipios()` | Todos los municipios reales de `tb_municipio` (código DANE de 5 dígitos) — cacheado en memoria del proceso. Usado para el filtro de la pantalla y para resolver el texto libre "Municipio" del archivo cargado |
+| `cargarPreciosReferenciaEps(formData)` | Parsea el archivo (`precio-referencia-eps-parser.ts`), resuelve cada texto de municipio contra el catálogo DANE (exacto tras normalizar acentos/mayúsculas/espacios; ambiguo o no encontrado se reporta, nunca se adivina) y hace UPSERT en lotes de 300 filas (`ON CONFLICT (nit_entidad, municipio_codigo, codigo) DO UPDATE`, usando el truco `RETURNING (xmax = 0)` para contar insertados vs. actualizados) |
+| `listarPreciosReferenciaEps(filtros)` | Listado paginado con filtros por municipio/EPS/código |
+| `eliminarPrecioReferenciaEps(id)` | Borrado de una fila puntual |
+| `eliminarPreciosReferenciaEpsPorEntidadMunicipio(nit, municipioCodigo)` | Borrado masivo de una carga completa (para reemplazarla por una versión corregida) |
+
+**Nota de coherencia**: el DDL embebido en `aplicarMigracionPrecioReferenciaEps` debe mantenerse IDÉNTICO al de `db/migrations/002_precio_referencia_eps.sql` — si se edita uno, editar el otro. La página `/precio-referencia-eps` recibe `rolActual` como prop desde el Server Component `page.tsx` (`getSession()` en servidor) para decidir si muestra el botón; el gate real de seguridad es server-side dentro de la propia Server Action, el prop solo controla si el botón se ve.
+
+Ver metodología completa en [[Contratación#Módulo: Precios de Referencia de Otras EPS (2026-07-31)]].
 
 ## Endpoints planificados (aún no implementados)
 
