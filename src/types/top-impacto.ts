@@ -160,6 +160,13 @@ export interface ResultadoTopImpacto {
  *   total mostrado en el desglose coincida EXACTO con el valor de la barra,
  *   sin importar qué haya cambiado el usuario en los selectores después de
  *   consultar.
+ *   Fix 2026-07-31 (reporte: "cuando doy dble clic se demora mucho parece
+ *   que se colgara"): esta llamada de Nivel 2 pasa `{ soloPorCodigo: true }`
+ *   — con `ips` ya fijo a un solo prestador, `top20Prestadores`/
+ *   `top20Municipios` solo devolverían ese mismo prestador/su municipio, y
+ *   este nivel nunca los muestra (solo usa `top100`/`kpis`); saltarlos evita
+ *   pagar 2 de las 3 consultas pesadas del módulo sin necesidad. Ver
+ *   KnowledgeBase/09-Errores/Problemas Comunes.md #14 y Soluciones.md #14.
  * - Nivel 3 (código → facturas): sí requiere un tipo/consulta nueva, ver
  *   `FilaFacturaImpacto`/`ResultadoFacturasImpacto` y `getFacturasCodigoImpacto`
  *   en `top-impacto-actions.ts`. No se reutiliza `getMovimientoRipsCodigo`

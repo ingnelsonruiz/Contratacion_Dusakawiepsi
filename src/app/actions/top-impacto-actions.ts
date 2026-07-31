@@ -492,7 +492,32 @@ export async function getContratosPrestador(ips: number): Promise<OpcionContrato
 // Consulta principal
 // -----------------------------------------------------------------------
 
-export async function getTopImpacto(filtros: FiltrosImpacto): Promise<ResultadoTopImpacto> {
+/**
+ * `soloPorCodigo` — fix 2026-07-31 (reporte del usuario: "cuando doy dble
+ * clic se demora mucho parece que se colgara" al abrir el drill-down Nivel 2
+ * desde "Top 20 prestadores"). Causa: `abrirDrillPrestador` (en
+ * `top-impacto-client.tsx`) llama a esta misma función fijando `ips` a UN
+ * solo prestador, pero antes seguía ejecutando las 3 consultas secuenciales
+ * completas — incluyendo `obtenerPorPrestador` y `obtenerPorMunicipio`, que
+ * con `ips` ya fijo solo pueden devolver, respectivamente, ese mismo
+ * prestador en el puesto 1 y su(s) propio(s) municipio(s): datos que el
+ * modal de Nivel 2 NUNCA muestra (usa únicamente `top100`, ver
+ * `drillNivel2.top100` en `top-impacto-client.tsx` y el comentario en
+ * `types/top-impacto.ts` sobre por qué el Nivel 2 reutiliza
+ * `ResultadoTopImpacto` completo). Es decir: 2 de las 3 consultas pesadas
+ * (cada una ~3-10s sobre RIPS completo) se pagaban en cada doble clic sin
+ * que su resultado se usara para nada.
+ *
+ * Con `soloPorCodigo: true` se salta esas 2 consultas y se devuelven arreglos
+ * vacíos en `top20Prestadores`/`top20Municipios` — `kpis`/`top100`/
+ * `top20Codigos` (lo único que el drill-down consume) se calculan exactamente
+ * igual, con la misma `fragmento`/filtros, así que el resultado sigue siendo
+ * 100% coherente con el valor de la barra que originó el clic.
+ */
+export async function getTopImpacto(
+  filtros: FiltrosImpacto,
+  opciones?: { soloPorCodigo?: boolean }
+): Promise<ResultadoTopImpacto> {
   let codigoPrestador: string | null = null;
   if (filtros.ips) {
     const infoResult = await pool.query(
@@ -519,8 +544,8 @@ export async function getTopImpacto(filtros: FiltrosImpacto): Promise<ResultadoT
   // más confiable — coherente con el resto del proyecto, que prioriza
   // consultas confiables sobre consultas rápidas cuando compiten.
   const crudasPorCodigo = await obtenerPorCodigo(tipos, fragmento);
-  const top20Prestadores = await obtenerPorPrestador(tipos, fragmento);
-  const top20Municipios = await obtenerPorMunicipio(tipos, fragmento);
+  const top20Prestadores = opciones?.soloPorCodigo ? [] : await obtenerPorPrestador(tipos, fragmento);
+  const top20Municipios = opciones?.soloPorCodigo ? [] : await obtenerPorMunicipio(tipos, fragmento);
 
   const valorTotalRadicado = crudasPorCodigo.reduce((acc, f) => acc + f.valor, 0);
   const totalRegistros = crudasPorCodigo.reduce((acc, f) => acc + f.cantidad, 0);

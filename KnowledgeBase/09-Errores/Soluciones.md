@@ -211,6 +211,31 @@ import { CONTRATOS_EXCLUIDOS_MIGRACION } from "@/lib/negociacion/constantes";
 
 Regla general para el resto del proyecto: cualquier valor (constante, config, mapa de opciones) que necesite compartirse entre Server Actions va en `src/lib/` (sin la directiva), nunca exportado directamente desde un archivo `"use server"`. Las Server Actions de ese archivo lo importan como cualquier otro módulo.
 
+## 14. Saltar consultas no usadas en el drill-down de Top Impacto
+
+`getTopImpacto()` (`src/app/actions/top-impacto-actions.ts`) gana un segundo parámetro opcional, sin cambiar el comportamiento para ningún llamador existente que no lo pase:
+
+```ts
+export async function getTopImpacto(
+  filtros: FiltrosImpacto,
+  opciones?: { soloPorCodigo?: boolean }
+): Promise<ResultadoTopImpacto> {
+  // ... (fragmento/tipos sin cambios)
+  const crudasPorCodigo = await obtenerPorCodigo(tipos, fragmento);
+  const top20Prestadores = opciones?.soloPorCodigo ? [] : await obtenerPorPrestador(tipos, fragmento);
+  const top20Municipios = opciones?.soloPorCodigo ? [] : await obtenerPorMunicipio(tipos, fragmento);
+  // ... resto igual (kpis/top100/top20Codigos se calculan siempre, sin depender de las 2 de arriba)
+}
+```
+
+En el cliente, `abrirDrillPrestador()` (`top-impacto-client.tsx`) pasa el nuevo flag porque ya fijó `ips` a un solo prestador y solo consume `top100`:
+
+```ts
+const res = await getTopImpacto({ ...resultado.filtros, ips: p.ips }, { soloPorCodigo: true });
+```
+
+Efecto: el drill-down pasa de 3 consultas pesadas secuenciales a 1 sola — reduce el tiempo de apertura del modal a aproximadamente un tercio del anterior. El llamado principal de `consultar()` (sin `ips` fijo, para el gráfico/tabla completa) sigue sin pasar `opciones`, así que conserva las 3 consultas y su comportamiento intacto — igual que el export (`/api/export/top-impacto`), que también necesita el conjunto completo.
+
 ## Ver también
 - [[Problemas Comunes]]
 - [[Buenas Prácticas]]

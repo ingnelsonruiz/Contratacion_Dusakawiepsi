@@ -315,7 +315,13 @@ export function TopImpactoClient() {
     if (p.ips === null) return;
     setCargandoDrillNivel2(true);
     try {
-      const res = await getTopImpacto({ ...resultado.filtros, ips: p.ips });
+      // Fix 2026-07-31 (reporte del usuario: "cuando doy dble clic se demora
+      // mucho parece que se colgara"): `soloPorCodigo: true` salta las 2
+      // consultas de "top prestadores"/"top municipios" — inútiles aquí
+      // porque `ips` ya está fijo a un solo prestador — y este modal solo
+      // usa `top100` (ver `drillNivel2.top100` más abajo). Reduce el
+      // drill-down de 3 consultas pesadas secuenciales a 1.
+      const res = await getTopImpacto({ ...resultado.filtros, ips: p.ips }, { soloPorCodigo: true });
       setDrillNivel2(res);
     } finally {
       setCargandoDrillNivel2(false);
