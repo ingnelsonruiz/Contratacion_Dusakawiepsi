@@ -36,6 +36,15 @@ tags: [errores, problemas-conocidos, deuda-tecnica]
 - **Riesgo**: si se despliega en un plan con timeout de función < 90s, cualquier query de agregación pesada fallará antes de que el proxy responda.
 - **Mitigación**: ver [[Soluciones#5. Ajustar timeouts según el plan de hosting]].
 
+### 5b. Caso real confirmado: Top Impacto (`/top-impacto`) congelado en 92%
+
+- **Síntoma reportado por el usuario (2026-07-31)**: con filtros `tipo="Todos"` + municipio (Valledupar) + "Todos los contratos" (sin prestador que acote), la barra de progreso simulada quedaba congelada indefinidamente en "Armando los gráficos de mayor impacto… (92%)". Cita textual: *"se quedo aca no avanza"*.
+- **Por qué es exactamente el riesgo #5**: `getTopImpacto()` corre 3 queries de agregación SECUENCIALES sobre RIPS completos (ver problema #13 y la nota de arquitectura 2026-07-29 en `top-impacto-actions.ts` sobre por qué no se paralelizan) — es el caso más pesado del módulo, el que más probablemente supera el timeout de función serverless antes de que `PROXY_TIMEOUT_MS` (90s) siquiera se cumpla. `consultar()` en `top-impacto-client.tsx` solo tenía `try/finally` (sin `catch`), así que si la función serverless muere sin que la promesa del cliente se resuelva NI se rechace, no había ningún camino de código que apagara la barra — quedaba girando para siempre, sin mensaje.
+- **Fix aplicado (2026-07-31)**, en dos partes complementarias — ver [[Soluciones#5. Ajustar timeouts según el plan de hosting]] para el detalle de código:
+  1. `export const maxDuration = 120` agregado a `src/app/(protegido)/top-impacto/page.tsx`, pidiéndole a Vercel más margen de ejecución para las Server Actions invocadas desde esa página (Next.js/Vercel recorta este valor automáticamente si el plan contratado no lo permite; no rompe nada declararlo).
+  2. Aviso de seguridad del lado del cliente en `consultar()` (`top-impacto-client.tsx`): un `setTimeout` de 100s que, si la consulta real no resolvió antes, libera la UI igual y muestra un banner de error accionable (sugiere acotar el `tipo` o elegir un prestador puntual), en vez de dejar la barra congelada sin explicación. Se agregó también un `catch` real (antes no existía) para errores que sí llegan a rechazar la promesa.
+- **Limitación honesta**: este sandbox no tiene salida de red hacia `pg-proxy.onrender.com` (confirmado con `curl` → `HTTP_CODE:000`), así que el fix no pudo reproducirse ni confirmarse en vivo — es la mitigación del riesgo ya documentado, no una causa raíz 100% verificada contra el entorno real de producción. Si el problema persiste tras este fix, el siguiente paso es confirmar en el dashboard de Vercel el límite de duración de función del plan contratado (ver [[Vercel]]).
+
 ## 6. Mensaje de error ambiguo en login
 
 - **Dónde**: `loginAction`, catch de consulta SQL.

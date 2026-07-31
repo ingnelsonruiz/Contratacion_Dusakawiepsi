@@ -57,6 +57,50 @@ if (intentos >= 5 && dentroDeVentanaDeTiempo(intentos)) {
 
 Antes de desplegar en Vercel (ver [[Vercel]]): confirmar el límite de duración de función del plan contratado. Si es menor a 90s, considerar mover las queries de agregación pesada a un Route Handler con `export const maxDuration = <N>` (si el plan lo permite) o a un job separado (cron/worker) en vez de una función invocada por request de usuario.
 
+### Aplicado en Top Impacto (2026-07-31) — ver [[Problemas Comunes#5b. Caso real confirmado: Top Impacto (`/top-impacto`) congelado en 92%]]
+
+**1. `maxDuration` en la página** (`src/app/(protegido)/top-impacto/page.tsx`):
+
+```ts
+export const dynamic = "force-dynamic";
+export const maxDuration = 120; // margen sobre PROXY_TIMEOUT_MS (90s)
+```
+
+**2. Aviso de seguridad + `catch` real en el cliente** (`src/components/top-impacto/top-impacto-client.tsx`, dentro de `consultar()`):
+
+```ts
+const TIMEOUT_AVISO_CONSULTA_MS = 100_000; // por encima de PROXY_TIMEOUT_MS
+
+async function consultar() {
+  setCargando(true);
+  setProgreso(0);
+  setErrorConsulta(null);
+  let avisoDisparado = false;
+  const idAviso = setTimeout(() => {
+    avisoDisparado = true;
+    setErrorConsulta("La consulta está tardando más de lo esperado… acota el tipo o elige un prestador puntual.");
+    setCargando(false);
+  }, TIMEOUT_AVISO_CONSULTA_MS);
+
+  try {
+    const res = await getTopImpacto({ /* filtros */ });
+    if (avisoDisparado) return; // no pisar el aviso ya mostrado con datos tardíos
+    setResultado(res);
+  } catch (e) {
+    if (avisoDisparado) return;
+    setErrorConsulta(e instanceof Error ? `No se pudo completar la consulta: ${e.message}` : "Error inesperado.");
+  } finally {
+    clearTimeout(idAviso);
+    if (!avisoDisparado) {
+      setProgreso(100);
+      setCargando(false);
+    }
+  }
+}
+```
+
+Este patrón (timeout de aviso + `catch` explícito + banner de error `AlertTriangle`/`destructive`, mismo estilo que `analisis-propuesta-client.tsx` y `precio-referencia-eps-client.tsx`) es reutilizable en cualquier otro módulo con barra de progreso simulada (Dashboard de Riesgo, Perfil del Prestador) si se reporta el mismo síntoma de congelamiento.
+
 ## 6. Diferenciar errores de tabla inexistente vs. proxy caído
 
 ```ts

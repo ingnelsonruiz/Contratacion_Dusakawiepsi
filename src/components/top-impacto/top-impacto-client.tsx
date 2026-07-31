@@ -11,6 +11,7 @@ import ListChecks from "lucide-react/icons/list-checks";
 import Hash from "lucide-react/icons/hash";
 import X from "lucide-react/icons/x";
 import Loader2 from "lucide-react/icons/loader-2";
+import AlertTriangle from "lucide-react/icons/alert-triangle";
 
 import Search from "lucide-react/icons/search";
 import { Input } from "@/components/ui/input";
@@ -40,6 +41,15 @@ import type {
 } from "@/types/top-impacto";
 
 const PAGE_SIZE = 25;
+
+// Fix 2026-07-31: aviso de seguridad en el cliente. Si `getTopImpacto()`
+// nunca resuelve ni rechaza (función serverless matada por la plataforma
+// antes de que el proxy de BD responda — ver KnowledgeBase/09-Errores/
+// Problemas Comunes.md #5), esta espera libera la UI igual con un mensaje
+// accionable en vez de dejar la barra congelada para siempre. Por encima de
+// PROXY_TIMEOUT_MS (90s, src/lib/db.ts) para no cortar consultas que sí
+// están progresando normalmente dentro de ese margen.
+const TIMEOUT_AVISO_CONSULTA_MS = 100_000;
 
 const ETIQUETAS_TIPO_CORTA: Record<Exclude<TipoImpacto, "todos">, string> = {
   servicios: "Servicio",
@@ -264,6 +274,14 @@ export function TopImpactoClient() {
   const [cargando, setCargando] = useState(false);
   const [progreso, setProgreso] = useState(0);
   const [mensajeIdx, setMensajeIdx] = useState(0);
+  // Fix 2026-07-31 (reporte del usuario: "se quedo aca no avanza"): antes,
+  // `consultar()` solo tenía try/finally, así que si la consulta pesada
+  // (tipo="todos" + municipio, sin prestador que acote) tardaba más de lo
+  // que tolera la función serverless — ver KnowledgeBase/09-Errores/Problemas
+  // Comunes.md #5 — la barra se quedaba congelada en 92% para siempre, sin
+  // ningún mensaje. `errorConsulta` + el timeout de aviso de abajo le dan al
+  // usuario una salida clara en vez de una pantalla muerta.
+  const [errorConsulta, setErrorConsulta] = useState<string | null>(null);
 
   // Drill-down "de lo general a lo particular" (pedido 2026-07-30): Nivel 2
   // (prestador → códigos) y Nivel 3 (código → facturas) — ver comentario
@@ -383,6 +401,21 @@ export function TopImpactoClient() {
     setCargando(true);
     setProgreso(0);
     setPagina(1);
+    setErrorConsulta(null);
+    // Timer del aviso de seguridad — se cancela en el `finally` si la
+    // consulta real ya resolvió (éxito o error) antes de tiempo. Si nunca
+    // se cancela, es la señal misma de que la función quedó colgada.
+    let avisoDisparado = false;
+    const idAviso = setTimeout(() => {
+      avisoDisparado = true;
+      setErrorConsulta(
+        "La consulta está tardando más de lo esperado y puede haberse quedado sin respuesta del servidor. " +
+          "Esto suele pasar con filtros muy amplios (tipo \"Todos\" + un municipio, sin prestador). " +
+          "Sugerencia: elige un tipo específico (servicios, consultas, medicamentos o insumos) o un prestador puntual, y vuelve a consultar."
+      );
+      setCargando(false);
+    }, TIMEOUT_AVISO_CONSULTA_MS);
+
     try {
       const res = await getTopImpacto({
         tipo,
@@ -391,10 +424,21 @@ export function TopImpactoClient() {
         municipioCodigo: ipsSeleccionado ? null : municipioCodigo || null,
         numerosContrato: numerosContratoEfectivos(),
       });
+      if (avisoDisparado) return; // ya se le avisó al usuario y se soltó la UI; no pisar ese estado con datos tardíos.
       setResultado(res);
+    } catch (e) {
+      if (avisoDisparado) return;
+      setErrorConsulta(
+        e instanceof Error
+          ? `No se pudo completar la consulta: ${e.message}`
+          : "No se pudo completar la consulta por un error inesperado. Intenta de nuevo o acota los filtros."
+      );
     } finally {
-      setProgreso(100);
-      setCargando(false);
+      clearTimeout(idAviso);
+      if (!avisoDisparado) {
+        setProgreso(100);
+        setCargando(false);
+      }
     }
   }
 
@@ -598,6 +642,13 @@ export function TopImpactoClient() {
           )}
         </CardContent>
       </Card>
+
+      {errorConsulta && (
+        <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>{errorConsulta}</span>
+        </div>
+      )}
 
       {cargando ? (
         <Card>
