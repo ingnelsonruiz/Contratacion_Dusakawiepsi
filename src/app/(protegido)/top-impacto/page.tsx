@@ -12,13 +12,16 @@ export const dynamic = "force-dynamic";
 //
 // `maxDuration` se conserva (y se amplía) porque en Vercel el trabajo de
 // `after()` TAMBIÉN cuenta contra el límite de duración de la función que lo
-// programó — con el presupuesto nuevo del job (hasta 300s por consulta
-// pesada, ver OPCIONES_QUERY_JOB en top-impacto-actions.ts), 120s lo mataría
-// a mitad de camino. En despliegue self-hosted (`next start`) este export es
-// inofensivo/ignorado. El techo real en Vercel depende del plan contratado
-// (la plataforma lo recorta sola si el plan no lo permite — declararlo de
-// más no rompe nada); ver KnowledgeBase/08-Deployment/Vercel.md.
-export const maxDuration = 800;
+// programó. ⚠️ CORRECCIÓN 2026-08-02: un intento anterior declaró 800 y el
+// despliegue FALLÓ en la fase "Deploying outputs..." — Vercel NO recorta el
+// valor al techo del plan, RECHAZA el deploy completo si lo excede. 300 es
+// el máximo aceptado en el plan Pro (y en Hobby con Fluid Compute activo).
+// Si el deploy aún falla con este valor, el plan solo permite 60s: activar
+// Fluid Compute en Settings → Functions o bajar este valor a 60 (con 60s,
+// solo los análisis con prestador fijo alcanzan a terminar; los
+// EPS-completa necesitarán otro mecanismo de ejecución). En self-hosted
+// (`next start`) este export se ignora. Ver KnowledgeBase/08-Deployment/Vercel.md.
+export const maxDuration = 300;
 
 export default function TopImpactoPage() {
   return (
