@@ -204,7 +204,8 @@ export async function buscarJobReutilizable(modulo: string, filtrosHash: string)
 export async function obtenerEstadoJob(codigoJob: string): Promise<EstadoJobPayload | null> {
   const result = await pool.query(
     `SELECT codigo_job, estado, progreso, etapa, etapa_numero, etapa_total, etapas, mensaje,
-            registros_procesados, total_registros, codigos_encontrados, error
+            registros_procesados, total_registros, codigos_encontrados, error,
+            EXTRACT(EPOCH FROM (now() - fecha_actualizacion))::int AS segundos_desde_actualizacion
      FROM ${TABLA} WHERE codigo_job = $1 LIMIT 1`,
     [codigoJob],
     `${SOURCE}/estado`
@@ -224,6 +225,10 @@ export async function obtenerEstadoJob(codigoJob: string): Promise<EstadoJobPayl
     totalRegistros: r.total_registros === null || r.total_registros === undefined ? null : Number(r.total_registros),
     codigosEncontrados: Number(r.codigos_encontrados ?? 0),
     error: r.error ?? null,
+    segundosDesdeActualizacion:
+      r.segundos_desde_actualizacion === null || r.segundos_desde_actualizacion === undefined
+        ? null
+        : Number(r.segundos_desde_actualizacion),
   };
 }
 

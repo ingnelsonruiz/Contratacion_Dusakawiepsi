@@ -557,6 +557,28 @@ export function TopImpactoClient() {
           return;
         }
 
+        // Job MUERTO (2026-08-02): en Vercel, el trabajo en segundo plano de
+        // `after()` cuenta contra el límite de duración del plan — si la
+        // plataforma mata el proceso a mitad del análisis, la fila queda en
+        // 'procesando' sin que nadie la marque como error. Umbral de 360s sin
+        // NINGUNA escritura del job (> presupuesto máximo de una sola
+        // consulta pesada, 300s, durante la cual legítimamente no hay
+        // actualizaciones): a partir de ahí es un job abandonado, no lento.
+        if (
+          (estado.estado === "procesando" || estado.estado === "pendiente") &&
+          estado.segundosDesdeActualizacion !== null &&
+          estado.segundosDesdeActualizacion > 360
+        ) {
+          setErrorConsulta(
+            `El análisis dejó de reportar avance hace ${Math.round(estado.segundosDesdeActualizacion / 60)} minutos` +
+              `${estado.etapa ? ` (última etapa: "${estado.etapa}")` : ""} — probablemente el servidor lo interrumpió ` +
+              "(límite de duración de la plataforma de despliegue). Vuelve a consultar; si se repite, acota los filtros " +
+              "o revisa el límite de duración de funciones del plan de hosting."
+          );
+          setCargando(false);
+          return;
+        }
+
         if (intentos >= POLLING_MAX_INTENTOS) {
           setErrorConsulta(
             "El análisis puede seguir en curso en el servidor, pero esta pantalla no logró confirmar su avance en varios minutos. Espera un momento y vuelve a consultar."

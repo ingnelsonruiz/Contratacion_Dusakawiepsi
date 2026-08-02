@@ -29,6 +29,18 @@ export interface EstadoJobPayload {
   codigosEncontrados: number;
   /** Solo presente si `estado === 'error'`: mensaje técnico corto (no expone stack trace) para depuración del analista/soporte. */
   error: string | null;
+  /**
+   * Segundos desde la última escritura del job (calculado en el servidor con
+   * `now() - fecha_actualizacion`, no con el reloj del navegador). Usado por
+   * el cliente para detectar un job MUERTO: en Vercel, el trabajo de
+   * `after()` cuenta contra el límite de duración de la función según el
+   * plan — si la plataforma mata el proceso a mitad del análisis, la fila
+   * queda en 'procesando' para siempre sin nadie que la marque como error.
+   * Umbral en el cliente: > 360s (mayor que el presupuesto máximo de una
+   * sola consulta pesada, 300s, durante la cual legítimamente no hay
+   * escrituras al job).
+   */
+  segundosDesdeActualizacion: number | null;
 }
 
 /** Resultado de `iniciarAnalisisImpactoJob` — lo único que el cliente recibe en la respuesta inicial (rápida). */
