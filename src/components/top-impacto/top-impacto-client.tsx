@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import FileSpreadsheet from "lucide-react/icons/file-spreadsheet";
 import FileDown from "lucide-react/icons/file-down";
@@ -12,6 +12,8 @@ import Hash from "lucide-react/icons/hash";
 import X from "lucide-react/icons/x";
 import Loader2 from "lucide-react/icons/loader-2";
 import AlertTriangle from "lucide-react/icons/alert-triangle";
+import CheckCircle2 from "lucide-react/icons/check-circle-2";
+import Circle from "lucide-react/icons/circle";
 
 import Search from "lucide-react/icons/search";
 import { Input } from "@/components/ui/input";
@@ -28,6 +30,9 @@ import {
   getTopImpacto,
   getContratosPrestador,
   getFacturasCodigoImpacto,
+  iniciarAnalisisImpactoJob,
+  obtenerEstadoAnalisisImpactoJob,
+  obtenerResultadoAnalisisImpactoJob,
 } from "@/app/actions/top-impacto-actions";
 import type {
   TipoImpacto,
@@ -39,17 +44,24 @@ import type {
   FilaImpactoMunicipio,
   ResultadoFacturasImpacto,
 } from "@/types/top-impacto";
+import type { EstadoJobPayload } from "@/types/analisis-job";
 
 const PAGE_SIZE = 25;
 
-// Fix 2026-07-31: aviso de seguridad en el cliente. Si `getTopImpacto()`
-// nunca resuelve ni rechaza (función serverless matada por la plataforma
-// antes de que el proxy de BD responda — ver KnowledgeBase/09-Errores/
-// Problemas Comunes.md #5), esta espera libera la UI igual con un mensaje
-// accionable en vez de dejar la barra congelada para siempre. Por encima de
-// PROXY_TIMEOUT_MS (90s, src/lib/db.ts) para no cortar consultas que sí
-// están progresando normalmente dentro de ese margen.
-const TIMEOUT_AVISO_CONSULTA_MS = 100_000;
+// Rediseño 2026-08-02: `consultar()` ya no espera una sola Server Action
+// pesada de punta a punta (el patrón que producía el aviso "La consulta está
+// tardando más de lo esperado..." — ver KnowledgeBase/09-Errores/Problemas
+// Comunes.md #5b). Ahora crea un JOB (`iniciarAnalisisImpactoJob`, responde
+// casi al instante) y hace polling de su estado real
+// (`obtenerEstadoAnalisisImpactoJob`) cada `POLLING_INTERVALO_MS` — el
+// progreso, la etapa y los contadores que se muestran abajo vienen del
+// backend, no son una animación simulada.
+const POLLING_INTERVALO_MS = 1800;
+// Cubre el peor caso del presupuesto del job (3 consultas pesadas × 300s,
+// ver OPCIONES_QUERY_JOB en top-impacto-actions.ts): 500 × 1.8s ≈ 15 min
+// antes de avisar que está tardando anormalmente — el aviso es informativo,
+// el job puede seguir vivo en el servidor y reutilizarse al re-consultar.
+const POLLING_MAX_INTENTOS = 500;
 
 const ETIQUETAS_TIPO_CORTA: Record<Exclude<TipoImpacto, "todos">, string> = {
   servicios: "Servicio",
@@ -58,21 +70,81 @@ const ETIQUETAS_TIPO_CORTA: Record<Exclude<TipoImpacto, "todos">, string> = {
   insumos: "Insumo",
 };
 
-const MENSAJES_CARGA = [
-  "Filtrando facturas del período seleccionado…",
-  "Agregando procedimientos, medicamentos e insumos…",
-  "Calculando el ranking por valor radicado…",
-  "Armando los gráficos de mayor impacto…",
-];
-
-/** Barra de progreso simulada — mismo patrón ya usado en Dashboard de Riesgo y Perfil del Prestador (consultas pesadas EPS-completa, para que el usuario no sienta que la pantalla está trabada). */
-function BarraProgresoCarga({ progreso, mensaje }: { progreso: number; mensaje: string }) {
+/** Checklist de etapas (✓ completada / 🔄 en curso / ○ pendiente) — `etapas` y `etapaNumero` vienen tal cual del job real en el servidor, nunca calculados en el cliente. */
+function ChecklistEtapasJob({ etapas, etapaNumero }: { etapas: string[]; etapaNumero: number | null }) {
+  if (etapas.length === 0) return null;
   return (
-    <div className="space-y-2 py-6">
-      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-        <div className="h-full rounded-full bg-primary transition-all duration-200" style={{ width: `${progreso}%` }} />
+    <ul className="space-y-1.5">
+      {etapas.map((etiqueta, i) => {
+        const numero = i + 1;
+        const completada = etapaNumero !== null && numero < etapaNumero;
+        const enCurso = etapaNumero !== null && numero === etapaNumero;
+        return (
+          <li
+            key={etiqueta}
+            className={`flex items-center gap-2 text-sm ${
+              enCurso ? "font-medium text-foreground" : completada ? "text-muted-foreground" : "text-muted-foreground/50"
+            }`}
+          >
+            {completada ? (
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
+            ) : enCurso ? (
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
+            ) : (
+              <Circle className="h-4 w-4 shrink-0" />
+            )}
+            <span>{etiqueta}</span>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/**
+ * Panel de progreso REAL del job (reemplaza a la barra simulada anterior,
+ * `BarraProgresoCarga`) — porcentaje, mensaje, checklist de etapas y
+ * contadores, todos tal cual los reporta `analisis_job` en el servidor.
+ * `totalRegistros` solo se muestra si el backend ya lo conoce (al terminar)
+ * — no se inventa un total mientras el análisis está en curso, a propósito
+ * (ver comentario en `db/migrations/003_analisis_job.sql`).
+ */
+/** mm:ss a partir de segundos — para el contador de tiempo transcurrido. */
+function formatearDuracion(segundos: number): string {
+  const m = Math.floor(segundos / 60);
+  const s = segundos % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function PanelProgresoJob({ estado, segundos }: { estado: EstadoJobPayload | null; segundos: number }) {
+  const progreso = estado?.progreso ?? 3;
+  const mensaje = estado?.mensaje || estado?.etapa || "Iniciando análisis…";
+  const mostrarContadores = (estado?.registrosProcesados ?? 0) > 0 || (estado?.codigosEncontrados ?? 0) > 0;
+  return (
+    <div className="space-y-4 py-2">
+      <div className="space-y-2">
+        <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+          <div className="h-full rounded-full bg-primary transition-all duration-300" style={{ width: `${progreso}%` }} />
+        </div>
+        <p className="text-center text-xs text-muted-foreground">
+          {mensaje} ({progreso}%)
+        </p>
       </div>
-      <p className="text-center text-xs text-muted-foreground">{mensaje} ({Math.round(progreso)}%)</p>
+      {estado?.etapas?.length ? <ChecklistEtapasJob etapas={estado.etapas} etapaNumero={estado.etapaNumero} /> : null}
+      {mostrarContadores ? (
+        <p className="text-center text-xs text-muted-foreground">
+          Registros procesados: {(estado?.registrosProcesados ?? 0).toLocaleString("es-CO")}
+          {estado?.totalRegistros ? ` de ${estado.totalRegistros.toLocaleString("es-CO")}` : ""}
+          {estado?.codigosEncontrados ? ` · Códigos encontrados: ${estado.codigosEncontrados.toLocaleString("es-CO")}` : ""}
+        </p>
+      ) : null}
+      {/* Tiempo transcurrido REAL (no es progreso simulado — es un reloj):
+          da señal continua de vida aunque una consulta pesada mantenga el
+          mismo porcentaje varios segundos. */}
+      <p className="text-center text-[11px] text-muted-foreground/70">
+        Tiempo transcurrido: {formatearDuracion(segundos)} · El análisis corre en el servidor — esta pantalla se
+        actualiza sola.
+      </p>
     </div>
   );
 }
@@ -272,16 +344,33 @@ export function TopImpactoClient() {
 
   const [resultado, setResultado] = useState<ResultadoTopImpacto | null>(null);
   const [cargando, setCargando] = useState(false);
-  const [progreso, setProgreso] = useState(0);
-  const [mensajeIdx, setMensajeIdx] = useState(0);
-  // Fix 2026-07-31 (reporte del usuario: "se quedo aca no avanza"): antes,
-  // `consultar()` solo tenía try/finally, así que si la consulta pesada
-  // (tipo="todos" + municipio, sin prestador que acote) tardaba más de lo
-  // que tolera la función serverless — ver KnowledgeBase/09-Errores/Problemas
-  // Comunes.md #5 — la barra se quedaba congelada en 92% para siempre, sin
-  // ningún mensaje. `errorConsulta` + el timeout de aviso de abajo le dan al
-  // usuario una salida clara en vez de una pantalla muerta.
+  // Snapshot del último poll al job real (progreso/etapa/contadores) — ya no
+  // hay estado de "progreso simulado": todo lo que se muestra sale de aquí.
+  const [estadoJob, setEstadoJob] = useState<EstadoJobPayload | null>(null);
+  // Reloj de tiempo transcurrido mientras `cargando` — señal de vida
+  // continua para el usuario (NO es una barra simulada: es un reloj real).
+  const [segundosCarga, setSegundosCarga] = useState(0);
+  useEffect(() => {
+    if (!cargando) return;
+    setSegundosCarga(0);
+    const inicio = Date.now();
+    const intervalo = setInterval(() => setSegundosCarga(Math.floor((Date.now() - inicio) / 1000)), 1000);
+    return () => clearInterval(intervalo);
+  }, [cargando]);
+  // Rediseño 2026-08-02 (reemplaza el aviso de timeout de 2026-07-31): con el
+  // job corriendo en segundo plano en el servidor, un polling lento o
+  // interrumpido ya no significa que el análisis se haya colgado — solo que
+  // el navegador no pudo confirmarlo. `errorConsulta` sigue existiendo para
+  // mostrar tanto errores reales del análisis (con su etapa) como este aviso
+  // informativo de polling.
   const [errorConsulta, setErrorConsulta] = useState<string | null>(null);
+  // Identifica el job que el polling activo debe seguir — si se dispara una
+  // consulta nueva antes de que la anterior termine, el loop viejo se
+  // auto-cancela al notar que ya no coincide (ver `monitorearJob`).
+  const jobActivoRef = useRef<string | null>(null);
+  useEffect(() => () => {
+    jobActivoRef.current = null;
+  }, []);
 
   // Drill-down "de lo general a lo particular" (pedido 2026-07-30): Nivel 2
   // (prestador → códigos) y Nivel 3 (código → facturas) — ver comentario
@@ -293,6 +382,19 @@ export function TopImpactoClient() {
   const [drillCodigo, setDrillCodigo] = useState<FilaTopImpacto | null>(null);
   const [drillNivel3, setDrillNivel3] = useState<ResultadoFacturasImpacto | null>(null);
   const [cargandoDrillNivel3, setCargandoDrillNivel3] = useState(false);
+
+  // Cachés de drill-down (2026-08-02, reporte del usuario: el desglose por
+  // código "demora muchísimo"): reabrir el MISMO prestador (o el mismo
+  // código, Nivel 3) durante la sesión no debe volver a pagar la consulta
+  // pesada sobre RIPS — el dato de fondo no cambia entre un doble clic y el
+  // siguiente. Viven en refs (no re-renderizan) y se vacían cada vez que
+  // llega un `resultado` nuevo (filtros distintos ⇒ desgloses distintos).
+  const drillNivel2CacheRef = useRef<Map<number, ResultadoTopImpacto>>(new Map());
+  const drillNivel3CacheRef = useRef<Map<string, ResultadoFacturasImpacto>>(new Map());
+  useEffect(() => {
+    drillNivel2CacheRef.current.clear();
+    drillNivel3CacheRef.current.clear();
+  }, [resultado]);
 
   /**
    * Nivel 2: se llama de nuevo a `getTopImpacto`, pero con los MISMOS
@@ -313,6 +415,25 @@ export function TopImpactoClient() {
     // profundizar (mismo criterio de honestidad ya documentado en
     // `obtenerPorPrestador`: no ocultar el caso, explicarlo).
     if (p.ips === null) return;
+
+    // Atajo 1 (2026-08-02): si el análisis principal YA se calculó con este
+    // mismo prestador fijo en los filtros (caso típico: se filtró por un
+    // prestador y se hace doble clic en su única barra), el "desglose por
+    // código" de este modal es exactamente el `top100` que ya está en
+    // pantalla — mismos filtros, mismo `ips`, misma consulta. Cero llamadas.
+    if (resultado.filtros.ips === p.ips) {
+      setDrillNivel2(resultado);
+      return;
+    }
+
+    // Atajo 2: mismo prestador ya abierto antes en esta misma sesión de
+    // resultados — se sirve del caché en vez de recalcular sobre RIPS.
+    const enCache = drillNivel2CacheRef.current.get(p.ips);
+    if (enCache) {
+      setDrillNivel2(enCache);
+      return;
+    }
+
     setCargandoDrillNivel2(true);
     try {
       // Fix 2026-07-31 (reporte del usuario: "cuando doy dble clic se demora
@@ -322,6 +443,7 @@ export function TopImpactoClient() {
       // usa `top100` (ver `drillNivel2.top100` más abajo). Reduce el
       // drill-down de 3 consultas pesadas secuenciales a 1.
       const res = await getTopImpacto({ ...resultado.filtros, ips: p.ips }, { soloPorCodigo: true });
+      drillNivel2CacheRef.current.set(p.ips, res);
       setDrillNivel2(res);
     } finally {
       setCargandoDrillNivel2(false);
@@ -340,9 +462,20 @@ export function TopImpactoClient() {
     if (!drillPrestador || drillPrestador.ips === null || !drillNivel2) return;
     setDrillCodigo(fila);
     setDrillNivel3(null);
+
+    // Mismo código+prestador ya abierto antes en esta sesión de resultados —
+    // caché en vez de recalcular (2026-08-02, mismo criterio que el Nivel 2).
+    const claveCache = `${drillPrestador.ips}|${fila.tipo}|${fila.codigo}`;
+    const enCache = drillNivel3CacheRef.current.get(claveCache);
+    if (enCache) {
+      setDrillNivel3(enCache);
+      return;
+    }
+
     setCargandoDrillNivel3(true);
     try {
       const res = await getFacturasCodigoImpacto({ ...drillNivel2.filtros, ips: drillPrestador.ips }, fila.tipo, fila.codigo);
+      drillNivel3CacheRef.current.set(claveCache, res);
       setDrillNivel3(res);
     } finally {
       setCargandoDrillNivel3(false);
@@ -367,27 +500,6 @@ export function TopImpactoClient() {
       .finally(() => setCargandoOpciones(false));
   }, []);
 
-  useEffect(() => {
-    if (!cargando) return;
-    const intervalo = setInterval(() => {
-      setProgreso((actual) => {
-        if (actual >= 92) return actual;
-        const incremento = Math.max(0.3, (92 - actual) * 0.04);
-        return Math.min(92, actual + incremento);
-      });
-    }, 250);
-    return () => clearInterval(intervalo);
-  }, [cargando]);
-
-  useEffect(() => {
-    if (!cargando) {
-      setMensajeIdx(0);
-      return;
-    }
-    const intervalo = setInterval(() => setMensajeIdx((i) => (i + 1) % MENSAJES_CARGA.length), 2400);
-    return () => clearInterval(intervalo);
-  }, [cargando]);
-
   /**
    * Lista efectiva de contratos a enviar al servidor. Con prestador elegido,
    * son los contratos marcados en la cascada (por defecto, todos los suyos —
@@ -403,48 +515,109 @@ export function TopImpactoClient() {
     return numeroContrato ? [numeroContrato] : null;
   }
 
+  /**
+   * Polling del job real — se detiene solo (sin cancelar timers a mano)
+   * comparando `jobActivoRef.current` contra el `codigoJob` capturado en el
+   * cierre: si no coinciden, una consulta más nueva ya tomó el control y
+   * este loop simplemente deja de reprogramarse.
+   */
+  function monitorearJob(codigoJob: string) {
+    jobActivoRef.current = codigoJob;
+    let intentos = 0;
+
+    const poll = async () => {
+      if (jobActivoRef.current !== codigoJob) return;
+      intentos += 1;
+      try {
+        const estado = await obtenerEstadoAnalisisImpactoJob(codigoJob);
+        if (jobActivoRef.current !== codigoJob) return;
+
+        if (!estado) {
+          setErrorConsulta("No se encontró el análisis solicitado. Vuelve a consultar.");
+          setCargando(false);
+          return;
+        }
+        setEstadoJob(estado);
+
+        if (estado.estado === "completado") {
+          const res = await obtenerResultadoAnalisisImpactoJob(codigoJob);
+          if (jobActivoRef.current !== codigoJob) return;
+          if (res) {
+            setResultado(res);
+          } else {
+            setErrorConsulta("El análisis terminó pero no se pudo recuperar el resultado. Vuelve a consultar.");
+          }
+          setCargando(false);
+          return;
+        }
+
+        if (estado.estado === "error") {
+          setErrorConsulta(`${estado.etapa ? `Etapa "${estado.etapa}": ` : ""}${estado.mensaje ?? "El análisis terminó con un error."}`);
+          setCargando(false);
+          return;
+        }
+
+        if (intentos >= POLLING_MAX_INTENTOS) {
+          setErrorConsulta(
+            "El análisis puede seguir en curso en el servidor, pero esta pantalla no logró confirmar su avance en varios minutos. Espera un momento y vuelve a consultar."
+          );
+          setCargando(false);
+          return;
+        }
+
+        setTimeout(poll, POLLING_INTERVALO_MS);
+      } catch {
+        // Error de red puntual del polling en sí (no del análisis) — se
+        // reintenta en vez de abortar, mismo criterio de resiliencia que
+        // `src/lib/db.ts` usa contra el proxy.
+        if (jobActivoRef.current !== codigoJob) return;
+        if (intentos >= POLLING_MAX_INTENTOS) {
+          setErrorConsulta("No se pudo confirmar el estado del análisis. Vuelve a consultar.");
+          setCargando(false);
+          return;
+        }
+        setTimeout(poll, POLLING_INTERVALO_MS);
+      }
+    };
+
+    poll();
+  }
+
   async function consultar() {
     setCargando(true);
-    setProgreso(0);
     setPagina(1);
     setErrorConsulta(null);
-    // Timer del aviso de seguridad — se cancela en el `finally` si la
-    // consulta real ya resolvió (éxito o error) antes de tiempo. Si nunca
-    // se cancela, es la señal misma de que la función quedó colgada.
-    let avisoDisparado = false;
-    const idAviso = setTimeout(() => {
-      avisoDisparado = true;
-      setErrorConsulta(
-        "La consulta está tardando más de lo esperado y puede haberse quedado sin respuesta del servidor. " +
-          "Esto suele pasar con filtros muy amplios (tipo \"Todos\" + un municipio, sin prestador). " +
-          "Sugerencia: elige un tipo específico (servicios, consultas, medicamentos o insumos) o un prestador puntual, y vuelve a consultar."
-      );
-      setCargando(false);
-    }, TIMEOUT_AVISO_CONSULTA_MS);
+    setEstadoJob(null);
+    setResultado(null);
 
     try {
-      const res = await getTopImpacto({
+      const { codigoJob, reutilizado } = await iniciarAnalisisImpactoJob({
         tipo,
         anio,
         ips: ipsSeleccionado ? Number(ipsSeleccionado) : null,
         municipioCodigo: ipsSeleccionado ? null : municipioCodigo || null,
         numerosContrato: numerosContratoEfectivos(),
       });
-      if (avisoDisparado) return; // ya se le avisó al usuario y se soltó la UI; no pisar ese estado con datos tardíos.
-      setResultado(res);
+
+      if (reutilizado) {
+        const res = await obtenerResultadoAnalisisImpactoJob(codigoJob);
+        if (res) {
+          setResultado(res);
+          setCargando(false);
+          return;
+        }
+        // Si el resultado reutilizable no se pudo recuperar (job purgado,
+        // etc.), se sigue igual con el polling normal como respaldo.
+      }
+
+      monitorearJob(codigoJob);
     } catch (e) {
-      if (avisoDisparado) return;
       setErrorConsulta(
         e instanceof Error
-          ? `No se pudo completar la consulta: ${e.message}`
-          : "No se pudo completar la consulta por un error inesperado. Intenta de nuevo o acota los filtros."
+          ? `No se pudo iniciar el análisis: ${e.message}`
+          : "No se pudo iniciar el análisis por un error inesperado. Intenta de nuevo."
       );
-    } finally {
-      clearTimeout(idAviso);
-      if (!avisoDisparado) {
-        setProgreso(100);
-        setCargando(false);
-      }
+      setCargando(false);
     }
   }
 
@@ -659,7 +832,7 @@ export function TopImpactoClient() {
       {cargando ? (
         <Card>
           <CardContent className="pt-6">
-            <BarraProgresoCarga progreso={progreso} mensaje={MENSAJES_CARGA[mensajeIdx]} />
+            <PanelProgresoJob estado={estadoJob} segundos={segundosCarga} />
           </CardContent>
         </Card>
       ) : null}

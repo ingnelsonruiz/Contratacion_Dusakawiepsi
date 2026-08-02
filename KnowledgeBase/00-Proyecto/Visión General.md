@@ -40,8 +40,8 @@ Es un **proyecto de aplicación independiente** (repositorio, deploy y código s
 
 ## Estado actual
 
-> [!warning] Fase 0 (Fundación) + Módulo 1 (Tarifario Vigente e Histórico) — completados
-> Scaffold Next.js 15 + autenticación propia + estructura base, **más** el primer módulo de análisis real: `/tarifarios` (listado de contratos con filtros/paginación) y `/tarifarios/[id]` (detalle con pestañas Procedimientos/Medicamentos/Insumos/Paquetes/Otros), consultando ARYUWIS en vivo. **Los módulos 2 a 8 siguen sin implementar.** Ver [[Roadmap]] y [[Pendientes]].
+> [!warning] Actualizado 2026-08-02 — 4 módulos originales + 4 módulos nuevos en producción
+> Fase 0 (Fundación) + **Módulo 1** (`/tarifarios`) + **Módulo 2** (`/comparativo`, con el Dashboard Analítico de Riesgo Contractual) + **Módulo 3 MVP** (`/historico-prestador`) + **Módulo 4 MVP** (`/consumo-frecuencia`) están completados y en producción, consultando ARYUWIS/RIPS en vivo (sin el ETL de pre-agregación originalmente planificado). Además, el equipo construyó **4 módulos que no estaban en los 8 originales**: Perfil Competitivo del Prestador (`/perfil-prestador`), Análisis de Códigos de Mayor Impacto Económico (`/top-impacto`), Análisis de Propuesta del Prestador (`/analisis-propuesta`) y Precios de Referencia de Otras EPS (`/precio-referencia-eps`). **Quedan sin implementar**: Módulo 5 (Simulador), Módulo 6 (Benchmark externo, diferido a propósito) y Módulo 8 (Administración); el Módulo 7 (Dashboard Ejecutivo) sigue siendo un placeholder visual. Ver [[Roadmap]], [[Pendientes]] y [[Contratación]] (esta última con el detalle día a día de cada hito, es la fuente más actualizada).
 
 ## Documentos relacionados
 

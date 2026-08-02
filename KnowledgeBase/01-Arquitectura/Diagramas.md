@@ -30,10 +30,14 @@ graph TD
     Login -->|loginAction exitoso| Dashboard["/dashboard"]
     Middleware{{"middleware.ts<br/>valida cookie de sesión"}}
     Middleware -.protege.-> Dashboard
-    Middleware -.protege.-> Tarifarios["/tarifarios (planificado)"]
-    Middleware -.protege.-> Comparativo["/comparativo (planificado)"]
-    Middleware -.protege.-> Consumo["/consumo (planificado)"]
-    Middleware -.protege.-> Sobrecostos["/sobrecostos (planificado)"]
+    Middleware -.protege.-> Tarifarios["/tarifarios ✅"]
+    Middleware -.protege.-> Comparativo["/comparativo ✅"]
+    Middleware -.protege.-> Historico["/historico-prestador ✅"]
+    Middleware -.protege.-> Perfil["/perfil-prestador ✅"]
+    Middleware -.protege.-> Consumo["/consumo-frecuencia ✅"]
+    Middleware -.protege.-> TopImpacto["/top-impacto ✅"]
+    Middleware -.protege.-> Propuesta["/analisis-propuesta ✅"]
+    Middleware -.protege.-> RefEps["/precio-referencia-eps ✅"]
     Middleware -.protege.-> Simulador["/simulador (planificado)"]
     Middleware -.protege.-> Benchmark["/benchmark (planificado)"]
     Middleware -.protege.-> Admin["/admin (planificado)"]
@@ -43,10 +47,18 @@ graph TD
     style Dashboard fill:#2d5,stroke:#333
     style Login fill:#2d5,stroke:#333
     style Root fill:#2d5,stroke:#333
+    style Tarifarios fill:#2d5,stroke:#333
+    style Comparativo fill:#2d5,stroke:#333
+    style Historico fill:#2d5,stroke:#333
+    style Perfil fill:#2d5,stroke:#333
+    style Consumo fill:#2d5,stroke:#333
+    style TopImpacto fill:#2d5,stroke:#333
+    style Propuesta fill:#2d5,stroke:#333
+    style RefEps fill:#2d5,stroke:#333
 ```
 
-> [!note]
-> Solo `/`, `/login` y `/dashboard` existen hoy en código. El resto de rutas están en el `matcher` de `middleware.ts` (ya protegidas de antemano) pero sus páginas aún no se han construido.
+> [!note] Actualizado 2026-08-02
+> 8 módulos de análisis ya tienen página implementada (`✅`) — ver [[Páginas]] para el detalle de cada uno. Solo `/simulador`, `/benchmark` y `/admin` siguen en el `matcher` de `middleware.ts` (ya protegidas de antemano) sin página construida todavía.
 
 ## Diagrama Entidad-Relación (parcial + planificado)
 
@@ -80,8 +92,8 @@ graph LR
     Admin --> UC8[Excluir datos atípicos]
 ```
 
-> [!warning]
-> Este diagrama refleja la **jerarquía de roles diseñada** (`tieneRolMinimo()` en `src/lib/auth.ts`: `analista < jefe_contratacion < admin`). Los casos de uso UC1-UC8 corresponden a los módulos planificados; ninguno tiene UI implementada todavía salvo el login/logout.
+> [!warning] Actualizado 2026-08-02
+> Este diagrama refleja la **jerarquía de roles diseñada** (`tieneRolMinimo()` en `src/lib/auth.ts`: `analista < jefe_contratacion < admin`). UC1 (Tarifarios), UC2 (Comparativos, incluye Dashboard de Riesgo/Perfil del Prestador/Top Impacto/Análisis de Propuesta/Precios de Referencia EPS) y UC3 (Consumo/Frecuencia) ya tienen UI implementada — ver [[Páginas]]. UC4 (Simular escenarios), UC6 (Gestionar usuarios) y UC7 (Ver auditoría) siguen sin construir. UC8 (Excluir datos atípicos) tampoco existe. La única acción con gate de rol real hoy es el botón "Aplicar migración" de Precios de Referencia EPS (rol `admin`) — `tieneRolMinimo()` no se usa en ningún otro flujo todavía, ver [[Autorizaciones]].
 
 ## Ver también
 - [[Arquitectura General]]

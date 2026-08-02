@@ -5,7 +5,10 @@ tags: [frontend, componentes, react]
 # Componentes
 
 ## Propósito
-Inventariar todos los componentes React existentes hoy en `src/components/`. El proyecto está en Fase 0, por lo que el inventario es corto — crecerá un módulo a la vez según [[Roadmap]].
+Inventariar todos los componentes React existentes hoy en `src/components/`.
+
+> [!info] Actualizado 2026-08-02
+> El inventario creció de Fase 0 a 8 módulos en producción (4 originales + 4 nuevos) — ver [[Roadmap]] para el estado consolidado. Las secciones de Módulo 1 y "Componentes de aplicación" describen el estado más temprano; las secciones de Módulo 2 en adelante fueron agregadas en esta actualización.
 
 ## Componentes UI (Shadcn/Radix) — `src/components/ui/`
 
@@ -61,9 +64,56 @@ const handleLogout = () => {
 > [!note] Por qué `Paginacion` no acepta una función como prop
 > Un intento inicial pasaba `hrefForPage: (page) => string` desde el Server Component `/tarifarios/page.tsx` — Next.js falló con *"Functions cannot be passed directly to Client Components"*. Los Server Components solo pueden pasar props serializables a un Client Component; se corrigió pasando `baseHref` (string) + `queryParams` (objeto plano) y armando el `href` **dentro** del Client Component.
 
+## Componentes del Módulo 2 — `src/components/comparativo/` ✅
+
+| Componente | Archivo | Tipo | Propósito |
+|---|---|---|---|
+| `ComparativoClient` | `comparativo-client.tsx` | Client | Orquesta las pestañas "Comparativo por municipio"/"Buscar código", panel de umbrales del semáforo, filtro multi-selección por estado, selector Promedio/Mediana, exportación Excel/CSV |
+| `DashboardRiesgoTab` | `dashboard-riesgo-tab.tsx` | Client | Pestaña "Dashboard Analítico de Riesgo Contractual" (Fase A) — KPIs, ranking de riesgo, heatmap por municipio, Top 20, modales de doble clic con la fuente de cada KPI (`TablaFuenteKpi`) |
+| `semaforo-ui.tsx` | `semaforo-ui.tsx` | — (helpers de UI) | `FiltroEstadosSemaforo`/`colorSemaforo`/`ESTADOS_SEMAFORO`, extraídos de `comparativo-client.tsx` para reutilizar en Módulo 3 |
+
+> [!warning] Archivo de alto riesgo de edición
+> `comparativo-client.tsx` es grande y tiene historial de corrupción por bytes NUL al editarlo (ver [[Problemas Comunes]]/[[Soluciones]]) — por eso el Dashboard de Riesgo se aisló en su propio archivo (`dashboard-riesgo-tab.tsx`) en vez de crecer dentro del mismo componente.
+
+## Componentes del Módulo 3 — `src/components/historico-prestador/` ✅
+
+| Componente | Archivo | Tipo | Propósito |
+|---|---|---|---|
+| `HistoricoPrestadorClient` | `historico-prestador-client.tsx` | Client | Selección de prestador, tabla comparativa 2025 vs. vigente, `GraficoPuntos` (SVG propio, sin `recharts`), KPIs con segmentadores clicables, sub-segmentador subieron/bajaron/igual, paginación de 100 |
+
+## Componentes del Módulo 4 — `src/components/consumo-frecuencia/` ✅
+
+| Componente | Archivo | Tipo | Propósito |
+|---|---|---|---|
+| `ConsumoFrecuenciaClient` | `consumo-frecuencia-client.tsx` | Client | Selector de prestador + 2 `<input type="date">` (Desde/Hasta, tope 92 días), KPIs, tabla ordenable por código |
+
+## Componentes de "Perfil Competitivo del Prestador" — `src/components/perfil-prestador/` ✅
+
+| Componente | Archivo | Tipo | Propósito |
+|---|---|---|---|
+| `PerfilPrestadorClient` | `perfil-prestador-client.tsx` | Client | Resumen ejecutivo, acordeón por código (`FilaCodigoPerfilRow`) con pares del municipio, tooltips explicativos, modal de ranking completo, botón "Ver movimientos RIPS" por prestador (modal factura por factura) |
+
+## Componentes de "Análisis de Códigos de Mayor Impacto Económico" — `src/components/top-impacto/` ✅
+
+| Componente | Archivo | Tipo | Propósito |
+|---|---|---|---|
+| `TopImpactoClient` | `top-impacto-client.tsx` | Client | Filtros combinables con selector en cascada Prestador→Contrato(s)→Municipio, 3 gráficos de barras HTML/CSS (sin librería de terceros), tabla Top 100 ordenable/paginada de a 25, drill-down de 3 niveles (`abrirDrillPrestador`) |
+
+## Componentes de "Análisis de Propuesta del Prestador" — `src/components/analisis-propuesta/` ✅
+
+| Componente | Archivo | Tipo | Propósito |
+|---|---|---|---|
+| `AnalisisPropuestaClient` | `analisis-propuesta-client.tsx` | Client | Sube archivo de propuesta (CSV/TXT/XLSX) vía `FormData`, `construirFilasAcordeon()` fusiona prestadores reales + fila sintética de la propuesta, descarga de "Contrapropuesta" con columnas dinámicas vía `fetch`+`blob` (único módulo del proyecto con descarga `POST`) |
+
+## Componentes de "Precios de Referencia de Otras EPS" — `src/components/precio-referencia-eps/` ✅
+
+| Componente | Archivo | Tipo | Propósito |
+|---|---|---|---|
+| `PrecioReferenciaEpsClient` | `precio-referencia-eps-client.tsx` | Client | Carga de archivo (Nit/Prestador/Municipio/Codigo/Descripcion/Precio de otras EPS), tabla de consulta/depuración con filtros y borrado, banner + botón "Aplicar migración" (solo rol `admin`) si la tabla `negociacion_contratacion_precio_referencia_eps` aún no existe |
+
 ## Componentes planificados (no existen aún)
 
-Según `docs/ARQUITECTURA.md` §2.3, cuando se construyan los módulos existirán carpetas `components/comparativo/`, `components/consumo/`, `components/simulador/`, `components/benchmark/`, `components/dashboard/` — ninguna existe todavía.
+Según `docs/ARQUITECTURA.md` §2.3, cuando se construyan los módulos restantes existirán carpetas `components/simulador/`, `components/benchmark/`, `components/admin/` — ninguna existe todavía.
 
 ## Diagrama de composición actual
 

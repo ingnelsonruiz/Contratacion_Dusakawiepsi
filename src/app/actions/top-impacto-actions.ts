@@ -17,10 +17,28 @@
  * `movimiento-rips-actions.ts` sobre por qué NUNCA usar `IN (subquery)`).
  */
 
-import { pool } from "@/lib/db";
+import { after } from "next/server";
+import { pool, type OpcionesQuery } from "@/lib/db";
+import { getSession } from "@/lib/auth";
 import { CONTRATOS_EXCLUIDOS_MIGRACION } from "@/lib/negociacion/constantes";
 import { construirFilaTopImpacto, calcularKpisTopImpacto, type FilaCrudaTopImpacto } from "@/lib/negociacion/top-impacto";
 import { sqlFacturasCanonicas, joinFacturaCanonica } from "@/lib/negociacion/rips-dedup";
+import {
+  calcularHashFiltros,
+  calcularProgresoEtapa,
+  ETAPA_PREPARANDO,
+  ETAPA_CONSTRUYENDO_TOP,
+  ETIQUETAS_ETAPA_POR_TIPO,
+} from "@/lib/negociacion/analisis-job";
+import {
+  crearJob,
+  actualizarJob,
+  marcarJobCompletado,
+  marcarJobError,
+  buscarJobReutilizable,
+  obtenerEstadoJob,
+  obtenerResultadoJob,
+} from "@/lib/negociacion/analisis-job-store";
 import type {
   TipoImpacto,
   FiltrosImpacto,
@@ -32,6 +50,7 @@ import type {
   FilaFacturaImpacto,
   ResultadoFacturasImpacto,
 } from "@/types/top-impacto";
+import type { EstadoJobPayload, IniciarJobResultado } from "@/types/analisis-job";
 
 const SOURCE = "top-impacto";
 
@@ -240,14 +259,50 @@ function construirJoinFactura(alias: string): string {
   return `JOIN facturas_periodo fp ON fp.consecutivo_rips = ${alias}.consecutivo_rips ${joinFacturaCanonica(alias)}`;
 }
 
-async function obtenerPorCodigo(tipos: TipoEspecifico[], fragmento: FragmentoFacturas): Promise<FilaCrudaTopImpacto[]> {
+/**
+ * JOIN a un catálogo garantizado 1:1 (2026-08-02) — CORRECCIÓN de una
+ * inflación silenciosa reportada por el usuario como discrepancia entre el
+ * KPI "Valor total radicado" y la barra del mismo prestador en "Top 20
+ * prestadores" (caso real: $3.510.936.767 vs $3.229.580.952, mismo filtro).
+ *
+ * Causa: `codigo_interno` NO es la PK de `tb_cup`/`tb_medicamento`/
+ * `tb_insumo` (las PK reales son `cup`/`medicamento`/`insumo` — ver
+ * CLAUDE.md del ecosistema, sección 6). Si el catálogo tiene 2+ filas con el
+ * mismo `codigo_interno`, el `LEFT JOIN` directo multiplica cada línea de
+ * detalle RIPS por esa cantidad — inflando `COUNT(*)` y `SUM(valor)` en
+ * `obtenerPorCodigo` (que SÍ joinea catálogos) pero no en
+ * `obtenerPorPrestador`/`obtenerPorMunicipio` (que no los joinean): exactamente
+ * el patrón de la discrepancia observada (KPI > barra).
+ *
+ * Fix: joinear contra el catálogo YA deduplicado por `codigo_interno`
+ * (`GROUP BY codigo_interno` + `MAX(descripcion)` — determinístico). Los
+ * catálogos son tablas chicas (miles de filas), agruparlas cuesta
+ * milisegundos. Cuando NO hay duplicados el resultado es idéntico al del
+ * join directo — el cambio solo altera resultados en los casos donde el join
+ * directo estaba contando dinero de más.
+ */
+function joinCatalogoDeduplicado(
+  tabla: string,
+  aliasCatalogo: string,
+  columnaDescripcion: string,
+  aliasDetalle: string,
+  columnaCodigo: string
+): string {
+  return `LEFT JOIN (SELECT codigo_interno, MAX(${columnaDescripcion}) AS ${columnaDescripcion} FROM administrativo.${tabla} GROUP BY codigo_interno) ${aliasCatalogo} ON ${aliasCatalogo}.codigo_interno = ${aliasDetalle}.${columnaCodigo}`;
+}
+
+async function obtenerPorCodigo(
+  tipos: TipoEspecifico[],
+  fragmento: FragmentoFacturas,
+  opcionesQuery?: OpcionesQuery
+): Promise<FilaCrudaTopImpacto[]> {
   const ramas = tipos.map((t) => {
     const info = TABLA_TIPO[t];
     // `catalogoFallback` (hoy solo "insumos" → tb_cup): si el código no
     // resuelve en el catálogo principal, se intenta el de respaldo antes de
     // caer en NULL — ver comentario completo en TABLA_TIPO.
     const joinFallback = info.catalogoFallback
-      ? `LEFT JOIN administrativo.${info.catalogoFallback} ${info.aliasFallback} ON ${info.aliasFallback}.codigo_interno = ${info.alias}.${info.columnaCodigo}`
+      ? joinCatalogoDeduplicado(info.catalogoFallback, info.aliasFallback!, "descripcion", info.alias, info.columnaCodigo)
       : "";
     const columnaDescripcion = info.catalogoFallback
       ? `COALESCE(cat.${info.columnaCatalogoDescripcion}, ${info.aliasFallback}.descripcion)`
@@ -260,14 +315,14 @@ async function obtenerPorCodigo(tipos: TipoEspecifico[], fragmento: FragmentoFac
         COUNT(*) AS cantidad, SUM(${info.alias}.${info.columnaValor}) AS valor, COUNT(DISTINCT fp.codigo_prestador) AS prestadores
       FROM administrativo.${info.tabla} ${info.alias}
       ${construirJoinFactura(info.alias)}
-      LEFT JOIN administrativo.${info.catalogo} cat ON cat.codigo_interno = ${info.alias}.${info.columnaCodigo}
+      ${joinCatalogoDeduplicado(info.catalogo, "cat", info.columnaCatalogoDescripcion, info.alias, info.columnaCodigo)}
       ${joinFallback}
       WHERE ${info.alias}.consecutivo_rips = ANY(${fragmento.ref})
       GROUP BY ${info.alias}.${info.columnaCodigo}, ${groupByDescripcion}
     `;
   });
   const sql = `${fragmento.cte} ${ramas.join(" UNION ALL ")} ORDER BY valor DESC`;
-  const result = await pool.query(sql, fragmento.params, `${SOURCE}/por-codigo`);
+  const result = await pool.query(sql, fragmento.params, `${SOURCE}/por-codigo`, opcionesQuery);
   const rows: any[] = result?.rows ?? [];
   return rows.map((r) => ({
     tipo: r.tipo,
@@ -339,7 +394,11 @@ function construirUnionCrudo(tipos: TipoEspecifico[], fragmento: FragmentoFactur
  * el dato, aunque estructuralmente lo correcto sería que TI registre esos
  * códigos de sede en `ct_ips` — reportado como pendiente en la KB.
  */
-async function obtenerPorPrestador(tipos: TipoEspecifico[], fragmento: FragmentoFacturas): Promise<FilaImpactoPrestador[]> {
+async function obtenerPorPrestador(
+  tipos: TipoEspecifico[],
+  fragmento: FragmentoFacturas,
+  opcionesQuery?: OpcionesQuery
+): Promise<FilaImpactoPrestador[]> {
   const sql = `
     ${fragmento.cte}
     SELECT ips.ips AS ips, COALESCE(ips.razon_social, 'Código no registrado: ' || t.codigo_prestador) AS razon_social, SUM(t.valor) AS valor
@@ -349,7 +408,7 @@ async function obtenerPorPrestador(tipos: TipoEspecifico[], fragmento: Fragmento
     ORDER BY valor DESC
     LIMIT 20
   `;
-  const result = await pool.query(sql, fragmento.params, `${SOURCE}/por-prestador`);
+  const result = await pool.query(sql, fragmento.params, `${SOURCE}/por-prestador`, opcionesQuery);
   const rows: any[] = result?.rows ?? [];
   return rows.map((r) => ({
     ips: r.ips === null || r.ips === undefined ? null : Number(r.ips),
@@ -358,7 +417,11 @@ async function obtenerPorPrestador(tipos: TipoEspecifico[], fragmento: Fragmento
   }));
 }
 
-async function obtenerPorMunicipio(tipos: TipoEspecifico[], fragmento: FragmentoFacturas): Promise<FilaImpactoMunicipio[]> {
+async function obtenerPorMunicipio(
+  tipos: TipoEspecifico[],
+  fragmento: FragmentoFacturas,
+  opcionesQuery?: OpcionesQuery
+): Promise<FilaImpactoMunicipio[]> {
   // A diferencia de `obtenerPorPrestador` (donde codigo_prestador → ips es
   // 1:1 vía índice único `ix_ct_ips_codigo_prestador`, así que agregar
   // t.codigo_prestador al GROUP BY es seguro), aquí VARIOS prestadores
@@ -385,7 +448,7 @@ async function obtenerPorMunicipio(tipos: TipoEspecifico[], fragmento: Fragmento
     ORDER BY valor DESC
     LIMIT 20
   `;
-  const result = await pool.query(sql, fragmento.params, `${SOURCE}/por-municipio`);
+  const result = await pool.query(sql, fragmento.params, `${SOURCE}/por-municipio`, opcionesQuery);
   const rows: any[] = result?.rows ?? [];
   return rows.map((r) => ({
     municipioCodigo: r.municipio_codigo ?? "",
@@ -561,6 +624,286 @@ export async function getTopImpacto(
 }
 
 // -----------------------------------------------------------------------
+// Job asíncrono con polling (2026-08-02) — reemplaza, solo para el flujo
+// principal de "Consultar" de la pantalla, la espera síncrona de
+// `getTopImpacto()` de arriba por: crear un job (respuesta inmediata),
+// procesarlo en segundo plano con `after()` (Next.js 15 — sin Redis/BullMQ/
+// infraestructura externa, ver diagnóstico entregado 2026-08-02), y dejar
+// que el cliente haga polling de su estado real etapa por etapa.
+//
+// `getTopImpacto()` NO se modifica ni se elimina: el drill-down (Nivel 2,
+// `abrirDrillPrestador` con `soloPorCodigo: true`) sigue llamándolo
+// directamente porque ya es una sola consulta rápida (~3-10s) y no es el
+// caso que reportó el usuario. Este bloque nuevo solo se usa desde
+// `consultar()` en `top-impacto-client.tsx`.
+//
+// CORRECCIÓN 2026-08-02 (mismo día, caso real reportado por el usuario:
+// "This operation was aborted" en la etapa "Construyendo TOP 100 y
+// rankings", con un solo prestador seleccionado): la primera versión de
+// este bloque separaba `obtenerPorCodigo` en HASTA 4 llamadas (una por tipo)
+// para poder mostrar un checklist "Procesando servicios" ✓ → "Procesando
+// medicamentos" etc. El costo que se había anticipado ("~2s extra por tipo
+// de más", ver commit anterior) resultó muy por debajo del real: cada
+// llamada adicional recalcula desde cero la CTE `facturas_periodo` +
+// `facturas_canonicas` (`construirFragmentoFacturas` — el proxy HTTP no
+// mantiene sesión de Postgres entre llamadas, así que un CTE materializado
+// en una llamada NO se puede reutilizar en la siguiente). Con `tipo=todos`
+// eso son hasta 6 recálculos totales de esa CTE en la misma ejecución (4
+// tipos + por-prestador + por-municipio) en vez de los 3 de siempre — y para
+// al menos un caso real (un prestador puntual, año completo, sin acotar por
+// contrato) la suma empujó una de las últimas consultas por encima de los
+// 90s de `PROXY_TIMEOUT_MS` (`src/lib/db.ts`), abortándola.
+//
+// FIX: se vuelve a UNA sola llamada a `obtenerPorCodigo` con todos los tipos
+// juntos (exactamente como en `getTopImpacto` de arriba, mismo SQL, mismos
+// parámetros, mismo resultado) — el job pasa a tener siempre 3 etapas fijas
+// ("Preparando información" → "Procesando <tipos>" → "Construyendo TOP 100 y
+// rankings"), ni una consulta pesada más que la versión síncrona original.
+// Se sacrifica el checklist detallado por tipo (servicios/consultas/
+// medicamentos/insumos por separado) a cambio de no reintroducir el mismo
+// problema de fondo que motivó todo este rediseño — coherente con el
+// principio ya documentado en este mismo archivo ("ejecutarlas una a la vez
+// es más lento en total pero muchísimo más confiable") y con la instrucción
+// explícita del usuario de no modificar una consulta sin verificar que el
+// resultado siga siendo exactamente equivalente.
+// -----------------------------------------------------------------------
+
+/**
+ * Presupuesto de las 3 consultas pesadas cuando corren DENTRO del job en
+ * segundo plano (no aplica a `getTopImpacto` síncrono ni al drill-down, que
+ * conservan los defaults de `db.ts`):
+ *
+ * - `timeoutMs: 300s` (vs. 90s default): el límite de 90s protege a un
+ *   navegador esperando una respuesta HTTP; aquí no hay navegador esperando
+ *   — el cliente ya recibió su `codigoJob` y solo hace polling liviano.
+ *
+ * - `maxRetries: 1` (vs. 3 default): CORRECCIÓN 2026-08-02 tras el caso real
+ *   "This operation was aborted" — el proxy NO cancela la consulta en
+ *   Postgres cuando el fetch se aborta por timeout (ver pg-proxy/index.js),
+ *   así que cada reintento dejaba la copia anterior corriendo y lanzaba
+ *   otra idéntica encima: 2-3 copias de la misma consulta pesada
+ *   compitiendo entre sí, cada intento más lento que el anterior y el abort
+ *   a los 90s garantizado. Un solo intento con presupuesto amplio es
+ *   estrictamente mejor que 3 intentos cortos que se sabotean mutuamente.
+ *   Ver comentario completo en `OpcionesQuery` (src/lib/db.ts).
+ */
+const OPCIONES_QUERY_JOB: OpcionesQuery = { timeoutMs: 300_000, maxRetries: 1 };
+
+const ETAPA_PROCESANDO_CODIGOS = "Procesando servicios, consultas, medicamentos e insumos";
+
+function etiquetaEtapaCodigos(tipos: TipoEspecifico[]): string {
+  return tipos.length === 1 ? ETIQUETAS_ETAPA_POR_TIPO[tipos[0]] : ETAPA_PROCESANDO_CODIGOS;
+}
+
+function construirEtapasJob(tipos: TipoEspecifico[]): string[] {
+  return [ETAPA_PREPARANDO, etiquetaEtapaCodigos(tipos), ETAPA_CONSTRUYENDO_TOP];
+}
+
+/**
+ * Crea el job y devuelve su código de inmediato — el cómputo pesado real
+ * corre después, vía `after()`, sin bloquear esta respuesta. Si ya existe un
+ * job 'completado' reciente (mismos filtros, ver
+ * `VENTANA_REUTILIZACION_JOB_MINUTOS`) lo reutiliza en vez de recalcular.
+ */
+/**
+ * Versión de la LÓGICA de cálculo, incluida en el hash de reutilización —
+ * subirla invalida automáticamente los jobs cacheados calculados con lógica
+ * anterior (sin esperar los 15 min de la ventana). Historial:
+ *   v2 (2026-08-02): joins a catálogos deduplicados por codigo_interno
+ *       (`joinCatalogoDeduplicado`) — los resultados previos podían traer
+ *       COUNT/SUM inflados por fanout del catálogo.
+ */
+const VERSION_ANALISIS_IMPACTO = 2;
+
+export async function iniciarAnalisisImpactoJob(filtros: FiltrosImpacto): Promise<IniciarJobResultado> {
+  const session = await getSession();
+  const filtrosParaHash = { ...(filtros as unknown as Record<string, unknown>), _version: VERSION_ANALISIS_IMPACTO };
+  const filtrosHash = calcularHashFiltros(filtrosParaHash);
+
+  const reutilizable = await buscarJobReutilizable(SOURCE, filtrosHash);
+  if (reutilizable) {
+    return { codigoJob: reutilizable, reutilizado: true };
+  }
+
+  const tipos = tiposSeleccionados(filtros.tipo);
+  const etapas = construirEtapasJob(tipos);
+  const codigoJob = await crearJob({
+    modulo: SOURCE,
+    filtros: filtrosParaHash,
+    filtrosHash,
+    etapas,
+    usuario: session?.username ?? null,
+    rol: session?.rol ?? null,
+  });
+
+  after(() => {
+    procesarAnalisisImpactoJob(codigoJob, filtros, tipos, etapas).catch((error) => {
+      console.error(`[${SOURCE}] Error no controlado procesando job ${codigoJob}:`, error);
+    });
+  });
+
+  return { codigoJob, reutilizado: false };
+}
+
+/** Se ejecuta DESPUÉS de que `iniciarAnalisisImpactoJob` ya respondió al cliente (vía `after()`) — no exportada, no es una Server Action en sí misma. */
+async function procesarAnalisisImpactoJob(
+  codigoJob: string,
+  filtros: FiltrosImpacto,
+  tipos: TipoEspecifico[],
+  etapas: string[]
+): Promise<void> {
+  let etapaActual = etapas[0];
+  try {
+    await actualizarJob(codigoJob, {
+      estado: "procesando",
+      etapa: etapaActual,
+      etapaNumero: 1,
+      progreso: calcularProgresoEtapa(1, etapas.length),
+      mensaje: "Resolviendo prestador y período del análisis...",
+    });
+
+    // Se trae también razón social + municipio del prestador (una sola
+    // consulta liviana e indexada) — necesarios para el atajo de rankings
+    // de más abajo cuando el filtro tiene un prestador fijo.
+    let codigoPrestador: string | null = null;
+    let infoPrestador: { razonSocial: string; municipioCodigo: string | null; municipioNombre: string | null } | null = null;
+    if (filtros.ips) {
+      const infoResult = await pool.query(
+        `SELECT ips.codigo_prestador, ips.razon_social, ips.municipio AS municipio_codigo, mun.descripcion AS municipio_nombre
+         FROM administrativo.ct_ips ips
+         LEFT JOIN administrativo.tb_municipio mun ON mun.municipio = ips.municipio
+         WHERE ips.ips = $1 LIMIT 1`,
+        [filtros.ips],
+        `${SOURCE}/codigo-prestador-job`
+      );
+      const fila = infoResult?.rows?.[0];
+      codigoPrestador = fila?.codigo_prestador ?? null;
+      infoPrestador = fila
+        ? {
+            razonSocial: fila.razon_social ?? "Prestador",
+            municipioCodigo: fila.municipio_codigo ?? null,
+            municipioNombre: fila.municipio_nombre ?? null,
+          }
+        : null;
+    }
+    const fragmento = construirFragmentoFacturas(filtros, codigoPrestador);
+
+    etapaActual = etapas[1];
+    await actualizarJob(codigoJob, {
+      etapa: etapaActual,
+      etapaNumero: 2,
+      progreso: calcularProgresoEtapa(2, etapas.length),
+      mensaje: `${etapaActual}...`,
+    });
+
+    // Misma llamada, mismo SQL, mismos parámetros que `getTopImpacto` de
+    // arriba (1 sola consulta con todos los tipos seleccionados en un único
+    // UNION ALL) — ver comentario extenso arriba sobre por qué NO se separa
+    // por tipo. `OPCIONES_QUERY_JOB`: presupuesto amplio + sin reintentos.
+    const crudasPorCodigo = await obtenerPorCodigo(tipos, fragmento, OPCIONES_QUERY_JOB);
+    const registrosProcesados = crudasPorCodigo.reduce((acc, f) => acc + f.cantidad, 0);
+    const codigosEncontrados = crudasPorCodigo.length;
+    await actualizarJob(codigoJob, { registrosProcesados, codigosEncontrados });
+
+    const valorTotalRadicado = crudasPorCodigo.reduce((acc, f) => acc + f.valor, 0);
+
+    etapaActual = etapas[2];
+    await actualizarJob(codigoJob, {
+      etapa: etapaActual,
+      etapaNumero: 3,
+      progreso: calcularProgresoEtapa(3, etapas.length),
+      mensaje: "Calculando ranking de prestadores y municipios...",
+      registrosProcesados,
+      codigosEncontrados,
+    });
+
+    let top20Prestadores: FilaImpactoPrestador[];
+    let top20Municipios: FilaImpactoMunicipio[];
+
+    if (filtros.ips && codigoPrestador && infoPrestador) {
+      // OPTIMIZACIÓN 2026-08-02 (reporte del usuario: "demora muchísimo, da
+      // la sensación de que se bloqueó", con un prestador seleccionado): con
+      // el prestador FIJO, estas 2 consultas pesadas son matemáticamente
+      // redundantes — la CTE `facturas_periodo` ya filtra `codigo_prestador
+      // = $N` en `rips_af`, así que `fp.codigo_prestador` es CONSTANTE en
+      // todas las filas del UNION crudo:
+      //
+      // - `obtenerPorPrestador` (GROUP BY ese único código, 1:1 contra
+      //   `ct_ips` vía índice único `ix_ct_ips_codigo_prestador`) solo puede
+      //   devolver 1 fila: este prestador, con SUM(valor) sobre exactamente
+      //   las mismas líneas de detalle que ya sumó `obtenerPorCodigo` — es
+      //   decir, `valorTotalRadicado`, ya calculado.
+      // - `obtenerPorMunicipio` solo puede devolver 1 fila: el municipio de
+      //   `ct_ips` de este prestador (o el fallback 'Sin identificar
+      //   (código X)' si `tb_municipio` no resuelve — replicado abajo).
+      //
+      // Derivarlas sin tocar la BD elimina 2 de las 3 consultas pesadas del
+      // job para este caso (~3x menos tiempo total). Mismo razonamiento que
+      // el fix `soloPorCodigo` del drill-down (2026-07-31), pero aquí las
+      // 2 filas SÍ se muestran (gráficos de 1 barra), no se omiten.
+      top20Prestadores =
+        valorTotalRadicado > 0
+          ? [{ ips: filtros.ips, razonSocial: infoPrestador.razonSocial, valorTotal: valorTotalRadicado }]
+          : [];
+      top20Municipios =
+        valorTotalRadicado > 0
+          ? [
+              {
+                municipioCodigo: infoPrestador.municipioCodigo ?? "",
+                municipioNombre: infoPrestador.municipioNombre ?? `Sin identificar (código ${codigoPrestador})`,
+                valorTotal: valorTotalRadicado,
+              },
+            ]
+          : [];
+    } else {
+      // Caso EPS-completa (sin prestador fijo): las 2 consultas siguen
+      // siendo necesarias. Se actualiza el mensaje entre una y otra para
+      // que el usuario vea movimiento real en vez de un 95% estático.
+      top20Prestadores = await obtenerPorPrestador(tipos, fragmento, OPCIONES_QUERY_JOB);
+      await actualizarJob(codigoJob, { mensaje: "Calculando ranking de municipios...", progreso: 97 });
+      top20Municipios = await obtenerPorMunicipio(tipos, fragmento, OPCIONES_QUERY_JOB);
+    }
+
+    const totalRegistros = registrosProcesados;
+    const todasLasFilas = crudasPorCodigo.map((c) => construirFilaTopImpacto(c, valorTotalRadicado));
+    const top100 = todasLasFilas.slice(0, 100);
+    const top20Codigos = top100.slice(0, 20);
+    const kpis = calcularKpisTopImpacto(todasLasFilas, valorTotalRadicado, totalRegistros);
+
+    const resultado: ResultadoTopImpacto = { filtros, kpis, top100, top20Codigos, top20Prestadores, top20Municipios };
+
+    await marcarJobCompletado(codigoJob, {
+      resultado,
+      registrosProcesados: totalRegistros,
+      codigosEncontrados: todasLasFilas.length,
+    });
+  } catch (error: any) {
+    const mensajeAmigable =
+      error instanceof Error
+        ? `No se pudo completar el análisis: ${error.message}`
+        : "No se pudo completar el análisis por un error inesperado.";
+    console.error(`[${SOURCE}] Job ${codigoJob} falló en etapa "${etapaActual}":`, error);
+    try {
+      await marcarJobError(codigoJob, etapaActual, mensajeAmigable, error instanceof Error ? error.message : String(error));
+    } catch (error2) {
+      console.error(`[${SOURCE}] Además falló al registrar el error del job ${codigoJob}:`, error2);
+    }
+  }
+}
+
+/** Consumida por el polling del cliente cada ~1.8s — nunca incluye `resultado` (payload liviano, solo lo necesario para pintar el progreso). */
+export async function obtenerEstadoAnalisisImpactoJob(codigoJob: string): Promise<EstadoJobPayload | null> {
+  return obtenerEstadoJob(codigoJob);
+}
+
+/** Se llama UNA vez, cuando el polling detecta `estado === 'completado'`. `null` si el job no existe o todavía no terminó (defensivo; el cliente solo debería llamarla tras ver 'completado'). */
+export async function obtenerResultadoAnalisisImpactoJob(codigoJob: string): Promise<ResultadoTopImpacto | null> {
+  const fila = await obtenerResultadoJob(codigoJob);
+  if (!fila || fila.estado !== "completado" || !fila.resultado) return null;
+  return fila.resultado as ResultadoTopImpacto;
+}
+
+// -----------------------------------------------------------------------
 // Drill-down "de lo general a lo particular" (2026-07-30) — Nivel 3
 // -----------------------------------------------------------------------
 
@@ -649,8 +992,11 @@ export async function getFacturasCodigoImpacto(
   const params = [...fragmento.params, codigo];
   const idxCodigo = params.length;
 
+  // `joinCatalogoDeduplicado` (2026-08-02): mismo blindaje 1:1 que en
+  // `obtenerPorCodigo` — sin él, un `codigo_interno` duplicado en el catálogo
+  // inflaría cantidad/valor de cada factura de esta lista.
   const joinFallback = info2.catalogoFallback
-    ? `LEFT JOIN administrativo.${info2.catalogoFallback} fb ON fb.codigo_interno = ${info2.alias}.${info2.columnaCodigo}`
+    ? joinCatalogoDeduplicado(info2.catalogoFallback, "fb", "descripcion", info2.alias, info2.columnaCodigo)
     : "";
   const columnaDescripcion = info2.catalogoFallback
     ? `COALESCE(cat.${info2.columnaCatalogoDescripcion}, fb.descripcion)`
@@ -668,7 +1014,7 @@ export async function getFacturasCodigoImpacto(
       MAX(${columnaDescripcion}) AS descripcion
     FROM administrativo.${info2.tabla} ${info2.alias}
     ${joinFacturaCanonica(info2.alias)}
-    LEFT JOIN administrativo.${info2.catalogo} cat ON cat.codigo_interno = ${info2.alias}.${info2.columnaCodigo}
+    ${joinCatalogoDeduplicado(info2.catalogo, "cat", info2.columnaCatalogoDescripcion, info2.alias, info2.columnaCodigo)}
     ${joinFallback}
     WHERE ${info2.alias}.${info2.columnaCodigo} = $${idxCodigo}
       AND ${info2.alias}.consecutivo_rips = ANY(${fragmento.ref})

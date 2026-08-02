@@ -38,10 +38,38 @@ async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: nu
   }
 }
 
-async function executeQuery(sql: string, params: any[] = [], source?: string): Promise<any> {
+/**
+ * Opciones por consulta (2026-08-02, módulo Top Impacto asíncrono):
+ *
+ * - `timeoutMs`: presupuesto de espera de ESTA consulta (default:
+ *   PROXY_TIMEOUT_MS = 90s). El límite de 90s existe para proteger una
+ *   petición HTTP que un navegador está esperando; una consulta lanzada
+ *   desde un job en segundo plano (`after()`) no tiene a nadie esperando y
+ *   puede recibir un presupuesto mayor.
+ *
+ * - `maxRetries`: intentos totales (default: PROXY_MAX_RETRIES = 3).
+ *   CRÍTICO para consultas pesadas: el proxy NO cancela la consulta en
+ *   Postgres cuando este cliente aborta el fetch (ver pg-proxy/index.js —
+ *   `client.query` sigue corriendo aunque la respuesta ya no tenga a quién
+ *   llegar). Reintentar una consulta pesada abortada por timeout deja la
+ *   copia anterior corriendo y lanza otra idéntica encima: 2 y luego 3
+ *   copias compitiendo por los mismos recursos, cada intento más lento que
+ *   el anterior y el abort garantizado. Es el mismo antipatrón ya
+ *   documentado arriba para los 502 lentos ("reintentar solo apilaría seq
+ *   scans"), llegando por la vía del AbortError. Las consultas pesadas de
+ *   un job deben usar `maxRetries: 1`.
+ */
+export interface OpcionesQuery {
+  timeoutMs?: number;
+  maxRetries?: number;
+}
+
+async function executeQuery(sql: string, params: any[] = [], source?: string, opciones?: OpcionesQuery): Promise<any> {
+  const timeoutMs = opciones?.timeoutMs ?? PROXY_TIMEOUT_MS;
+  const maxRetries = opciones?.maxRetries ?? PROXY_MAX_RETRIES;
   let lastError: Error | null = null;
 
-  for (let attempt = 1; attempt <= PROXY_MAX_RETRIES; attempt++) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const startedAt = Date.now();
     try {
       const res = await fetchWithTimeout(
@@ -58,7 +86,7 @@ async function executeQuery(sql: string, params: any[] = [], source?: string): P
           body: JSON.stringify({ sql, params, source: source ? `Contratacion_dusakawiepi/${source}` : "Contratacion_dusakawiepi" }),
           cache: "no-store",
         },
-        PROXY_TIMEOUT_MS
+        timeoutMs
       );
 
       const bodyText = await res.text();
@@ -71,8 +99,8 @@ async function executeQuery(sql: string, params: any[] = [], source?: string): P
           const isServerError = res.status === 502 || res.status === 503;
           const looksLikeColdStart = isServerError && elapsed < PROXY_COLD_START_MAX_MS;
 
-          if (looksLikeColdStart && attempt < PROXY_MAX_RETRIES) {
-            console.warn(`[db] Proxy en cold start (${res.status}) tras ${elapsed}ms, intento ${attempt}/${PROXY_MAX_RETRIES}.`);
+          if (looksLikeColdStart && attempt < maxRetries) {
+            console.warn(`[db] Proxy en cold start (${res.status}) tras ${elapsed}ms, intento ${attempt}/${maxRetries}.`);
             lastError = new Error(`Proxy en cold start (${res.status})`);
             await new Promise((r) => setTimeout(r, 35000));
             continue;
@@ -119,8 +147,8 @@ async function executeQuery(sql: string, params: any[] = [], source?: string): P
         error?.message?.includes("ECONNRESET") ||
         error?.message?.includes("other side closed") ||
         error?.code === "UND_ERR_SOCKET";
-      if (attempt < PROXY_MAX_RETRIES && isRetryable) {
-        console.warn(`[db] Proxy no responde (intento ${attempt}/${PROXY_MAX_RETRIES}). Reintentando en ${PROXY_RETRY_DELAY_MS / 1000}s...`);
+      if (attempt < maxRetries && isRetryable) {
+        console.warn(`[db] Proxy no responde (intento ${attempt}/${maxRetries}). Reintentando en ${PROXY_RETRY_DELAY_MS / 1000}s...`);
         await new Promise((r) => setTimeout(r, PROXY_RETRY_DELAY_MS));
       } else {
         break;
@@ -133,9 +161,11 @@ async function executeQuery(sql: string, params: any[] = [], source?: string): P
 }
 
 export const pool = {
-  query: async (sql: string, params: any[] = [], source?: string) => executeQuery(sql, params, source),
+  query: async (sql: string, params: any[] = [], source?: string, opciones?: OpcionesQuery) =>
+    executeQuery(sql, params, source, opciones),
   connect: async () => ({
-    query: async (sql: string, params: any[] = [], source?: string) => executeQuery(sql, params, source),
+    query: async (sql: string, params: any[] = [], source?: string, opciones?: OpcionesQuery) =>
+      executeQuery(sql, params, source, opciones),
     release: () => {},
   }),
 };
