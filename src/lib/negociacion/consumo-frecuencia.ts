@@ -5,18 +5,31 @@
  */
 
 import type { FilaConsumoCodigo, KpisConsumoPrestador, TipoConsumo } from "@/types/consumo-frecuencia";
+import { descripcionOFallback } from "@/lib/negociacion/catalogo-codigos";
 
 /**
  * Tope de seguridad del rango de fechas (días, inclusive) — decidido con el
  * usuario 2026-07-30 al reemplazar el selector de "un mes" por un rango
- * día-a-día. 92 días cubre cómodamente 3 meses calendario consecutivos
- * (incluyendo meses de 31 días). Único punto de verdad: se usa tanto en el
- * cliente (deshabilitar "Consultar" / mostrar aviso) como en el servidor
- * (Server Action y Route Handler de exportación, defensa en profundidad) —
- * ver KnowledgeBase/05-ReglasNegocio/Contratación.md para el detalle de
- * rendimiento verificado con EXPLAIN ANALYZE que motivó este tope.
+ * día-a-día, con tope original de 92 días (~3 meses).
+ *
+ * AMPLIACIÓN 2026-08-02 (pedido del usuario: "yo sé que puede hacerlo de más
+ * meses hasta un año"): 366 días (cubre un año calendario completo,
+ * incluyendo años bisiestos). Se basa en una medición YA documentada en este
+ * mismo archivo desde 2026-07-30 (ver comentario histórico abajo): un
+ * prestador de ALTO volumen con ~4.5 años de rango (todo el histórico
+ * disponible, ~18x más ancho que este nuevo tope) tardó 6-8s por tabla — muy
+ * por debajo del timeout de 90s del proxy. Un año es una fracción de esa
+ * prueba ya realizada, así que el margen de seguridad es amplio. Como
+ * precaución adicional (no probada explícitamente, por si el volumen a un
+ * año resulta más alto de lo estimado), las 3 consultas pesadas de
+ * `consumo-frecuencia-actions.ts` pasaron de `Promise.all` a secuenciales —
+ * ver comentario en `getConsumoPrestador`.
+ *
+ * Único punto de verdad: se usa tanto en el cliente (deshabilitar
+ * "Consultar" / mostrar aviso) como en el servidor (Server Action y Route
+ * Handler de exportación, defensa en profundidad).
  */
-export const MAX_DIAS_RANGO_CONSUMO = 92;
+export const MAX_DIAS_RANGO_CONSUMO = 366;
 
 export interface ValidacionRangoConsumo {
   valido: boolean;
@@ -37,7 +50,7 @@ export function validarRangoConsumo(fechaInicio: string, fechaFin: string): Vali
   if (dias > MAX_DIAS_RANGO_CONSUMO) {
     return {
       valido: false,
-      error: `El rango elegido es de ${dias} días — el máximo permitido es ${MAX_DIAS_RANGO_CONSUMO} días (~3 meses). Las tablas RIPS no tienen índice por fecha; un rango más amplio arriesga un timeout de la consulta.`,
+      error: `El rango elegido es de ${dias} días — el máximo permitido es ${MAX_DIAS_RANGO_CONSUMO} días (~1 año). Las tablas RIPS no tienen índice por fecha; un rango más amplio arriesga un timeout de la consulta.`,
     };
   }
   return { valido: true };
@@ -46,14 +59,18 @@ export function validarRangoConsumo(fechaInicio: string, fechaFin: string): Vali
 /** Construye una fila de consumo agregado (ya viene agregada desde SQL: cantidad + valor total por código). */
 export function construirFilaConsumo(
   codigoTarifa: string,
-  descripcion: string,
+  descripcion: string | null,
   tipo: TipoConsumo,
   cantidad: number,
   valorTotal: number
 ): FilaConsumoCodigo {
   return {
     codigoTarifa,
-    descripcion,
+    // `descripcionOFallback` (fix 2026-08-02, reporte del usuario: "hay
+    // códigos que no le aparecen descripción", ej. 968927/965389) — antes
+    // se mostraba el código repetido como si fuera su propia descripción.
+    // Ver catalogo-codigos.ts para el detalle completo.
+    descripcion: descripcionOFallback(codigoTarifa, descripcion),
     tipo,
     cantidad,
     valorTotal,

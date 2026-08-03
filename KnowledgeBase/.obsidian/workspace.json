@@ -180,6 +180,9 @@
   },
   "active": "c030b56668143309",
   "lastOpenFiles": [
+    "01-Arquitectura/Tecnologías.md",
+    "09-Errores/Soluciones.md",
+    "09-Errores/Problemas Comunes.md",
     "09-Errores/Soluciones.md.tmp.25968.4d5f0def9de1",
     "09-Errores/Problemas Comunes.md.tmp.25968.7cdc4472e8ad",
     "09-Errores/Problemas Comunes.md.tmp.15696.5123cbfeb4bb",
@@ -190,7 +193,6 @@
     "03-Frontend/Páginas.md.tmp.22032.f50f70e9eaf9",
     "05-ReglasNegocio/Contratación.md.tmp.27760.31b9c9c0dfbe",
     "02-Backend/API.md.tmp.43020.d39591149d6c",
-    "05-ReglasNegocio/Contratación.md.tmp.43020.75c3e1d71916",
     "05-ReglasNegocio/Validaciones.md",
     "02-Backend/Middleware.md",
     "07-Integraciones/Servicios.md",

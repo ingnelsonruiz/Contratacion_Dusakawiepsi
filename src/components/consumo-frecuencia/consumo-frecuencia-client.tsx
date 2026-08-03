@@ -16,8 +16,18 @@ import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@
 import { Paginacion } from "@/components/tarifarios/paginacion";
 import { formatearMoneda, formatearFecha } from "@/lib/negociacion/formato";
 import { validarRangoConsumo, MAX_DIAS_RANGO_CONSUMO } from "@/lib/negociacion/consumo-frecuencia";
-import { getOpcionesPrestadoresConsumo, getConsumoPrestador } from "@/app/actions/consumo-frecuencia-actions";
-import type { OpcionPrestadorConsumo, ResultadoConsumoPrestador, TipoConsumo } from "@/types/consumo-frecuencia";
+import {
+  getOpcionesPrestadoresConsumo,
+  getConsumoPrestador,
+  getContratosPrestadorConsumo,
+} from "@/app/actions/consumo-frecuencia-actions";
+import type {
+  OpcionPrestadorConsumo,
+  OpcionContratoConsumo,
+  ResultadoConsumoContrato,
+  ResultadoConsumoPrestador,
+  TipoConsumo,
+} from "@/types/consumo-frecuencia";
 
 const PAGE_SIZE = 25;
 
@@ -62,7 +72,7 @@ export function ConsumoFrecuenciaClient() {
   const [fechaInicio, setFechaInicio] = useState(aIso(primerDiaMesAnterior));
   const [fechaFin, setFechaFin] = useState(aIso(ultimoDiaMesAnterior));
 
-  // Única fuente de verdad del tope de rango (~3 meses) — misma función que
+  // Única fuente de verdad del tope de rango (~1 año) — misma función que
   // valida en el servidor (Server Action y export), ver
   // src/lib/negociacion/consumo-frecuencia.ts.
   const validacionRango = useMemo(() => validarRangoConsumo(fechaInicio, fechaFin), [fechaInicio, fechaFin]);
@@ -76,11 +86,113 @@ export function ConsumoFrecuenciaClient() {
   const [orden, setOrden] = useState<"valor_desc" | "valor_asc" | "cantidad_desc" | "cantidad_asc">("valor_desc");
   const [pagina, setPagina] = useState(1);
 
+  // Consumo por contrato (2026-08-02, pedido del usuario: "necesito saber el
+  // consumo por contrato... para cuando se hagan otrosí o ampliaciones saber
+  // qué consumos han tenido"). Independiente del flujo principal de arriba —
+  // no lo modifica ni depende de él.
+  const [contratosPrestador, setContratosPrestador] = useState<OpcionContratoConsumo[]>([]);
+  const [cargandoContratos, setCargandoContratos] = useState(false);
+  const [contratosSeleccionados, setContratosSeleccionados] = useState<Set<string>>(new Set());
+  const [resultadosPorContrato, setResultadosPorContrato] = useState<ResultadoConsumoContrato[] | null>(null);
+  const [cargandoPorContrato, setCargandoPorContrato] = useState(false);
+  const [contratoEnDetalle, setContratoEnDetalle] = useState<string | null>(null);
+
   useEffect(() => {
     getOpcionesPrestadoresConsumo()
       .then(setPrestadores)
       .finally(() => setCargandoPrestadores(false));
   }, []);
+
+  // Al cambiar de prestador, se recarga su lista de contratos y se limpia
+  // cualquier desglose por contrato que hubiera quedado del prestador anterior.
+  useEffect(() => {
+    setContratosSeleccionados(new Set());
+    setResultadosPorContrato(null);
+    setContratoEnDetalle(null);
+    if (!codigoPrestadorSeleccionado) {
+      setContratosPrestador([]);
+      return;
+    }
+    setCargandoContratos(true);
+    getContratosPrestadorConsumo(codigoPrestadorSeleccionado)
+      .then(setContratosPrestador)
+      .finally(() => setCargandoContratos(false));
+  }, [codigoPrestadorSeleccionado]);
+
+  function alternarContrato(numeroContrato: string) {
+    setContratosSeleccionados((actual) => {
+      const nuevo = new Set(actual);
+      if (nuevo.has(numeroContrato)) nuevo.delete(numeroContrato);
+      else nuevo.add(numeroContrato);
+      return nuevo;
+    });
+  }
+
+  /**
+   * Ejecuta `getConsumoPrestador` una vez POR CONTRATO seleccionado, con el
+   * MISMO rango de fechas elegido arriba para todos — la diferencia entre
+   * contratos es el filtro exacto `numero_contrato = ANY(...)` aplicado en
+   * el servidor (ver `construirFragmentoRango` en
+   * `consumo-frecuencia-actions.ts`), no una ventana de fechas distinta por
+   * contrato.
+   *
+   * CORRECCIÓN 2026-08-02: hasta esta versión, aquí se intersectaba el rango
+   * elegido con la vigencia de cada contrato (`intersectarVigenciaConRango`,
+   * ya eliminada) porque se creía que los RIPS no registraban bajo qué
+   * contrato se facturó un servicio. El usuario corrigió esa suposición
+   * ("en la factura va el número de contrato") y se verificó en la BD real:
+   * `rips_af.numero_contrato` existe y coincide exactamente con
+   * `ct_ips_contrato`. Ahora el filtro es exacto, no por fecha.
+   *
+   * Secuencial (no Promise.all), mismo criterio de confiabilidad que el
+   * resto del proyecto ante consultas pesadas repetidas contra el proxy.
+   */
+  async function desglosarPorContrato() {
+    if (contratosSeleccionados.size === 0 || !validacionRango.valido) return;
+    setCargandoPorContrato(true);
+    setContratoEnDetalle(null);
+    const seleccionados = contratosPrestador.filter((c) => contratosSeleccionados.has(c.numeroContrato));
+    const acumulado: ResultadoConsumoContrato[] = seleccionados.map((contrato) => ({
+      contrato,
+      resultado: null,
+      cargando: true,
+      error: null,
+    }));
+    setResultadosPorContrato(acumulado);
+
+    for (let i = 0; i < seleccionados.length; i++) {
+      const contrato = seleccionados[i];
+      try {
+        const res = await getConsumoPrestador(codigoPrestadorSeleccionado, fechaInicio, fechaFin, [contrato.numeroContrato]);
+        acumulado[i] = { contrato, resultado: res, cargando: false, error: null };
+      } catch (e: any) {
+        acumulado[i] = { contrato, resultado: null, cargando: false, error: e?.message ?? "No fue posible consultar este contrato." };
+      }
+      setResultadosPorContrato([...acumulado]);
+    }
+    setCargandoPorContrato(false);
+  }
+
+  /** CSV liviano del resumen por contrato — armado en el navegador (sin ruta nueva en el servidor) porque es solo un resumen de lo que ya está en pantalla. */
+  function exportarResumenContratoCsv() {
+    if (!resultadosPorContrato) return;
+    const encabezado = ["Contrato", "Vigencia contrato", "Facturas", "Códigos distintos", "Valor total facturado"];
+    const filasCsv = resultadosPorContrato.map((r) => [
+      r.contrato.numeroContrato,
+      `${r.contrato.fechaInicio} a ${r.contrato.fechaTerminacion}`,
+      r.resultado ? String(r.resultado.kpis.cantidadFacturas) : "0",
+      r.resultado ? String(r.resultado.kpis.cantidadCodigosDistintos) : "0",
+      r.resultado ? String(r.resultado.kpis.valorTotalFacturado) : "0",
+    ]);
+    const csv = [encabezado, ...filasCsv].map((fila) => fila.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(";")).join("\n");
+    const blob = new Blob([`﻿${csv}`], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `Consumo_por_contrato_${codigoPrestadorSeleccionado}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
 
   const prestadoresFiltrados = useMemo(() => {
     const q = busquedaPrestador.trim().toLowerCase();
@@ -194,7 +306,7 @@ export function ConsumoFrecuenciaClient() {
               Consultar
             </Button>
             <p className="text-xs text-muted-foreground sm:ml-auto">
-              Consumo real facturado (RIPS) — rango máximo de {MAX_DIAS_RANGO_CONSUMO} días (~3 meses) por el tamaño de las tablas RIPS.
+              Consumo real facturado (RIPS) — rango máximo de {MAX_DIAS_RANGO_CONSUMO} días (~1 año) por el tamaño de las tablas RIPS.
             </p>
           </div>
           {!validacionRango.valido && (
@@ -202,6 +314,138 @@ export function ConsumoFrecuenciaClient() {
           )}
         </CardContent>
       </Card>
+
+      {codigoPrestadorSeleccionado && (cargandoContratos || contratosPrestador.length > 0) && (
+        <Card>
+          <CardContent className="flex flex-col gap-3 pt-6">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-sm font-medium">Consumo por contrato de este prestador</p>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={desglosarPorContrato}
+                  disabled={contratosSeleccionados.size === 0 || !validacionRango.valido || cargandoPorContrato}
+                >
+                  Desglosar por contrato
+                </Button>
+                {resultadosPorContrato && (
+                  <Button size="sm" variant="outline" onClick={exportarResumenContratoCsv}>
+                    <FileDown className="h-4 w-4" /> CSV resumen
+                  </Button>
+                )}
+              </div>
+            </div>
+            {cargandoContratos ? (
+              <p className="text-xs text-muted-foreground">Cargando contratos de este prestador…</p>
+            ) : (
+            <div className="flex flex-wrap gap-2">
+              {contratosPrestador.map((c) => {
+                const seleccionado = contratosSeleccionados.has(c.numeroContrato);
+                return (
+                  <button
+                    key={c.numeroContrato}
+                    type="button"
+                    onClick={() => alternarContrato(c.numeroContrato)}
+                    className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                      seleccionado ? "border-primary bg-primary text-primary-foreground" : "border-input bg-background hover:bg-muted"
+                    }`}
+                  >
+                    {c.numeroContrato} · {formatearFecha(c.fechaInicio)}–{formatearFecha(c.fechaTerminacion)}
+                  </button>
+                );
+              })}
+            </div>
+            )}
+            <p className="text-xs text-muted-foreground">
+              El consumo de cada contrato se filtra de forma EXACTA por el número de contrato registrado en la factura
+              (`rips_af.numero_contrato`), sobre el mismo período elegido arriba — útil para comparar un contrato original
+              contra un otrosí/ampliación posterior. Cobertura real verificada: ~87–94% de las facturas desde 2022 tienen
+              contrato registrado; el resto (facturas sin ese dato, más frecuentes en años anteriores a 2022) no aparecerá
+              en ningún desglose por contrato aunque sí cuente en el consumo total del prestador arriba.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {resultadosPorContrato && (
+        <Card>
+          <CardContent className="pt-6">
+            <div className="overflow-x-auto rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Contrato</TableHead>
+                    <TableHead>Vigencia del contrato</TableHead>
+                    <TableHead className="text-right">Facturas</TableHead>
+                    <TableHead className="text-right">Códigos</TableHead>
+                    <TableHead className="text-right">Valor total</TableHead>
+                    <TableHead></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {resultadosPorContrato.map((r) => (
+                    <TableRow key={r.contrato.numeroContrato}>
+                      <TableCell className="font-medium">{r.contrato.numeroContrato}</TableCell>
+                      <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                        {formatearFecha(r.contrato.fechaInicio)} — {formatearFecha(r.contrato.fechaTerminacion)}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {r.cargando ? "…" : r.resultado?.kpis.cantidadFacturas.toLocaleString("es-CO") ?? "—"}
+                      </TableCell>
+                      <TableCell className="text-right">{r.resultado?.kpis.cantidadCodigosDistintos.toLocaleString("es-CO") ?? "—"}</TableCell>
+                      <TableCell className="text-right font-semibold">
+                        {r.resultado ? formatearMoneda(r.resultado.kpis.valorTotalFacturado) : r.error ? r.error : "$ 0"}
+                      </TableCell>
+                      <TableCell>
+                        {r.resultado && r.resultado.filas.length > 0 && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => setContratoEnDetalle((actual) => (actual === r.contrato.numeroContrato ? null : r.contrato.numeroContrato))}
+                          >
+                            {contratoEnDetalle === r.contrato.numeroContrato ? "Ocultar detalle" : "Ver detalle"}
+                          </Button>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+
+            {contratoEnDetalle && (
+              <div className="mt-4 max-h-[50vh] overflow-y-auto rounded-md border">
+                <Table>
+                  <TableHeader className="sticky top-0 z-10 bg-background shadow-sm">
+                    <TableRow>
+                      <TableHead>Código</TableHead>
+                      <TableHead>Descripción</TableHead>
+                      <TableHead>Tipo</TableHead>
+                      <TableHead className="text-right">Cantidad</TableHead>
+                      <TableHead className="text-right">Valor total</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {resultadosPorContrato
+                      .find((r) => r.contrato.numeroContrato === contratoEnDetalle)
+                      ?.resultado?.filas.map((fila) => (
+                        <TableRow key={`${fila.tipo}-${fila.codigoTarifa}`}>
+                          <TableCell className="font-mono text-xs">{fila.codigoTarifa}</TableCell>
+                          <TableCell className="max-w-[360px] truncate" title={fila.descripcion}>
+                            {fila.descripcion}
+                          </TableCell>
+                          <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{ETIQUETAS_TIPO[fila.tipo]}</TableCell>
+                          <TableCell className="text-right">{fila.cantidad.toLocaleString("es-CO")}</TableCell>
+                          <TableCell className="text-right font-semibold">{formatearMoneda(fila.valorTotal)}</TableCell>
+                        </TableRow>
+                      ))}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {consultado && (
         <>

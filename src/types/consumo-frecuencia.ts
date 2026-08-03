@@ -25,7 +25,8 @@
  *
  * Corrección 2026-07-30 (pedido del usuario): el selector pasó de "un mes
  * específico" a un rango de fechas día-a-día (fechaInicio/fechaFin), con un
- * tope de seguridad de `MAX_DIAS_RANGO_CONSUMO` días (~3 meses) — decidido
+ * tope de seguridad de `MAX_DIAS_RANGO_CONSUMO` días (366, ~1 año desde
+ * 2026-08-02; originalmente 92, ~3 meses) — decidido
  * con el usuario tras verificar con `EXPLAIN ANALYZE` que el costo del Seq
  * Scan sobre `rips_af` es prácticamente constante (bounded por el tamaño de
  * la tabla, no por el ancho del rango), pero el tamaño del resultado
@@ -45,6 +46,37 @@ export interface OpcionPrestadorConsumo {
   codigoPrestador: string;
   razonSocial: string;
   nit: string;
+}
+
+/**
+ * Contrato de un prestador puntual, para el desglose "consumo por contrato"
+ * (2026-08-02) — a diferencia de `OpcionPrestadorConsumo`, incluye contratos
+ * YA VENCIDOS (el caso de uso es comparar un contrato antiguo contra un
+ * otrosí/ampliación posterior). Ver `getContratosPrestadorConsumo`.
+ *
+ * CORRECCIÓN 2026-08-02 (el usuario verificó y tenía razón: "en la factura
+ * va el número de contrato, es más fácil identificar por ahí"): la atribución
+ * por contrato ya NO es una aproximación por solape de fechas de vigencia —
+ * se confirmó en la BD real que `rips_af.numero_contrato`/`consecutivo_contrato`
+ * existen y coinciden exactamente con `ct_ips_contrato.consecutivo_contrato`,
+ * con cobertura ~87-94% desde 2022. El filtro ahora es EXACTO
+ * (`numero_contrato = ANY(...)`, ver `construirFragmentoRango` en
+ * `consumo-frecuencia-actions.ts`), sobre el MISMO rango de fechas elegido
+ * por el usuario — ya no hay "período efectivo" intersectado por contrato.
+ */
+export interface OpcionContratoConsumo {
+  numeroContrato: string;
+  /** ISO `YYYY-MM-DD`. */
+  fechaInicio: string;
+  fechaTerminacion: string;
+}
+
+/** Un resultado de consumo filtrado EXACTAMENTE por `numero_contrato`, dentro del mismo rango de fechas elegido por el usuario para el prestador. */
+export interface ResultadoConsumoContrato {
+  contrato: OpcionContratoConsumo;
+  resultado: ResultadoConsumoPrestador | null;
+  cargando: boolean;
+  error: string | null;
 }
 
 /** Consumo agregado de un código puntual, dentro del prestador+mes elegido. */

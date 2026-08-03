@@ -23,6 +23,7 @@ import { getSession } from "@/lib/auth";
 import { CONTRATOS_EXCLUIDOS_MIGRACION } from "@/lib/negociacion/constantes";
 import { construirFilaTopImpacto, calcularKpisTopImpacto, type FilaCrudaTopImpacto } from "@/lib/negociacion/top-impacto";
 import { sqlFacturasCanonicas, joinFacturaCanonica } from "@/lib/negociacion/rips-dedup";
+import { joinCatalogoDeduplicado } from "@/lib/negociacion/catalogo-codigos";
 import {
   calcularHashFiltros,
   calcularProgresoEtapa,
@@ -259,37 +260,12 @@ function construirJoinFactura(alias: string): string {
   return `JOIN facturas_periodo fp ON fp.consecutivo_rips = ${alias}.consecutivo_rips ${joinFacturaCanonica(alias)}`;
 }
 
-/**
- * JOIN a un catálogo garantizado 1:1 (2026-08-02) — CORRECCIÓN de una
- * inflación silenciosa reportada por el usuario como discrepancia entre el
- * KPI "Valor total radicado" y la barra del mismo prestador en "Top 20
- * prestadores" (caso real: $3.510.936.767 vs $3.229.580.952, mismo filtro).
- *
- * Causa: `codigo_interno` NO es la PK de `tb_cup`/`tb_medicamento`/
- * `tb_insumo` (las PK reales son `cup`/`medicamento`/`insumo` — ver
- * CLAUDE.md del ecosistema, sección 6). Si el catálogo tiene 2+ filas con el
- * mismo `codigo_interno`, el `LEFT JOIN` directo multiplica cada línea de
- * detalle RIPS por esa cantidad — inflando `COUNT(*)` y `SUM(valor)` en
- * `obtenerPorCodigo` (que SÍ joinea catálogos) pero no en
- * `obtenerPorPrestador`/`obtenerPorMunicipio` (que no los joinean): exactamente
- * el patrón de la discrepancia observada (KPI > barra).
- *
- * Fix: joinear contra el catálogo YA deduplicado por `codigo_interno`
- * (`GROUP BY codigo_interno` + `MAX(descripcion)` — determinístico). Los
- * catálogos son tablas chicas (miles de filas), agruparlas cuesta
- * milisegundos. Cuando NO hay duplicados el resultado es idéntico al del
- * join directo — el cambio solo altera resultados en los casos donde el join
- * directo estaba contando dinero de más.
- */
-function joinCatalogoDeduplicado(
-  tabla: string,
-  aliasCatalogo: string,
-  columnaDescripcion: string,
-  aliasDetalle: string,
-  columnaCodigo: string
-): string {
-  return `LEFT JOIN (SELECT codigo_interno, MAX(${columnaDescripcion}) AS ${columnaDescripcion} FROM administrativo.${tabla} GROUP BY codigo_interno) ${aliasCatalogo} ON ${aliasCatalogo}.codigo_interno = ${aliasDetalle}.${columnaCodigo}`;
-}
+// `joinCatalogoDeduplicado` (fix 2026-08-02 de una inflación silenciosa por
+// `codigo_interno` no-único en los catálogos — caso real: KPI "Valor total
+// radicado" $3.510.936.767 vs. la barra del mismo prestador $3.229.580.952,
+// mismo filtro) — extraída 2026-08-02 a `catalogo-codigos.ts` para que
+// "Consumo y Frecuencia" (mismo riesgo, mismos catálogos) la reutilice en
+// vez de duplicar la lógica. Ver comentario completo en ese archivo.
 
 async function obtenerPorCodigo(
   tipos: TipoEspecifico[],

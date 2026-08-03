@@ -22,19 +22,44 @@
  * con el usuario 2026-07-28, ampliada 2026-07-30): un prestador a la vez,
  * solo Servicios+Medicamentos+Insumos (no Consultas/Hospitalizaciones en
  * este MVP), y un RANGO de fechas día-a-día con tope de seguridad de
- * `MAX_DIAS_RANGO_CONSUMO` días (~3 meses, ver validarRangoConsumo() en
+ * `MAX_DIAS_RANGO_CONSUMO` días (~1 año, ver validarRangoConsumo() en
  * src/lib/negociacion/consumo-frecuencia.ts) — reemplaza el selector de "un
  * mes específico" original tras pedido del usuario, manteniendo la misma
  * estrategia de consulta (rips_af acota primero, luego Index Scan por
  * consecutivo_rips) y el mismo criterio de nunca dejar el rango abierto —
  * ver KnowledgeBase/05-ReglasNegocio/Contratación.md.
+ *
+ * CORRECCIÓN 2026-08-02 (el usuario señaló, y se verificó contra la BD real,
+ * que estaba equivocado): `rips_af` SÍ tiene columnas de contrato —
+ * `numero_contrato` (varchar) y `consecutivo_contrato` (bigint, coincide
+ * exactamente con `ct_ips_contrato.consecutivo_contrato`, la PK real —
+ * verificado con un JOIN cruzado contra un prestador real con 21 contratos
+ * distintos en 2026, 100% de coincidencia en los casos poblados). Cobertura
+ * verificada por año desde que hay volumen real de datos (2022 en adelante,
+ * mismo corte que `PRIMER_ANIO_CON_DATOS` en otros módulos): 87–94% de las
+ * facturas tienen `consecutivo_contrato` poblado (2020–2021, antes de ese
+ * corte, la cobertura es mucho menor: 6.8%/61.5%). Esto significa que
+ * "consumo por contrato" puede filtrarse EXACTO (por `numero_contrato`
+ * registrado en la propia factura), no aproximarse por vigencia — reemplaza
+ * un primer diseño de este mismo día que intersectaba fechas de vigencia
+ * contra el rango elegido (mucho menos preciso, descartado). Esta misma
+ * corrección aplica también al filtro "Contrato" de "Top Impacto"
+ * (documentado ahí como limitación conocida, sin corregir todavía — ver
+ * KnowledgeBase/11-Tareas/Pendientes.md).
  */
 
 import { pool } from "@/lib/db";
 import { CONTRATOS_EXCLUIDOS_MIGRACION } from "@/lib/negociacion/constantes";
 import { construirFilaConsumo, calcularKpisConsumoPrestador, validarRangoConsumo } from "@/lib/negociacion/consumo-frecuencia";
 import { sqlFacturasCanonicas, joinFacturaCanonica } from "@/lib/negociacion/rips-dedup";
-import type { OpcionPrestadorConsumo, ResultadoConsumoPrestador, FilaConsumoCodigo, TipoConsumo } from "@/types/consumo-frecuencia";
+import { joinCatalogoDeduplicado } from "@/lib/negociacion/catalogo-codigos";
+import type {
+  OpcionPrestadorConsumo,
+  OpcionContratoConsumo,
+  ResultadoConsumoPrestador,
+  FilaConsumoCodigo,
+  TipoConsumo,
+} from "@/types/consumo-frecuencia";
 
 const SOURCE = "consumo-frecuencia";
 
@@ -62,6 +87,40 @@ export async function getOpcionesPrestadoresConsumo(): Promise<OpcionPrestadorCo
     codigoPrestador: r.codigo_prestador,
     razonSocial: r.razon_social,
     nit: r.nit,
+  }));
+}
+
+/**
+ * Contratos de UN prestador puntual (2026-08-02, pedido del usuario:
+ * "necesito saber el consumo por contrato... para cuando se hagan otrosí o
+ * ampliaciones saber qué consumos han tenido") — a diferencia de
+ * `getOpcionesPrestadoresConsumo` y del resto de selectores de contrato del
+ * proyecto (que solo listan contratos VIGENTES hoy), aquí se listan TODOS
+ * los contratos no anulados del prestador, sin filtrar por vigencia actual —
+ * el caso de uso explícito es comparar un contrato antiguo contra uno nuevo
+ * (otrosí/ampliación), así que un contrato ya vencido debe seguir apareciendo.
+ *
+ * Se consulta por `codigo_prestador` (no por `ips`) porque es la dimensión
+ * que ya usa el resto de este módulo (`OpcionPrestadorConsumo.codigoPrestador`,
+ * el mismo valor que ya está seleccionado en pantalla) — evita tener que
+ * agregar `ips` al selector de prestador solo para esta consulta.
+ */
+export async function getContratosPrestadorConsumo(codigoPrestador: string): Promise<OpcionContratoConsumo[]> {
+  const sql = `
+    SELECT c.numero_contrato, c.fecha_inicio, c.fecha_terminacion
+    FROM administrativo.ct_ips_contrato c
+    JOIN administrativo.ct_ips ips ON ips.ips = c.ips
+    WHERE ips.codigo_prestador = $1
+      AND c.fecha_anula IS NULL
+      AND c.numero_contrato != ALL($2)
+    ORDER BY c.fecha_inicio DESC
+  `;
+  const result = await pool.query(sql, [codigoPrestador, CONTRATOS_EXCLUIDOS_MIGRACION], `${SOURCE}/contratos-prestador`);
+  const rows: any[] = result?.rows ?? [];
+  return rows.map((r) => ({
+    numeroContrato: r.numero_contrato,
+    fechaInicio: String(r.fecha_inicio).slice(0, 10),
+    fechaTerminacion: String(r.fecha_terminacion).slice(0, 10),
   }));
 }
 
@@ -93,10 +152,25 @@ interface FragmentoRango {
  * limpiadas); sin deduplicar por factura, sus líneas de detalle se cuentan
  * una vez POR LOTE, inflando cantidad y valor (caso real verificado hasta
  * 13x). `facturas_canonicas` elige 1 sola copia por factura antes de agregar.
+ *
+ * `numerosContrato` (2026-08-02, "consumo por contrato"): filtro EXACTO por
+ * `rips_af.numero_contrato` — ver el comentario grande al inicio del archivo
+ * para la verificación de que esta columna existe y coincide con
+ * `ct_ips_contrato`. Opcional: sin ella, el comportamiento es idéntico al de
+ * siempre (todo el prestador, todos sus contratos).
  */
-function construirFragmentoRango(codigoPrestador: string, fechaInicio: string, fechaFin: string): FragmentoRango {
-  const condiciones = "codigo_prestador = $1 AND fecha_anula IS NULL AND fecha_servicio_rips >= $2 AND fecha_servicio_rips <= $3";
+function construirFragmentoRango(
+  codigoPrestador: string,
+  fechaInicio: string,
+  fechaFin: string,
+  numerosContrato?: string[] | null
+): FragmentoRango {
   const params: unknown[] = [codigoPrestador, fechaInicio, fechaFin];
+  let condiciones = "codigo_prestador = $1 AND fecha_anula IS NULL AND fecha_servicio_rips >= $2 AND fecha_servicio_rips <= $3";
+  if (numerosContrato && numerosContrato.length > 0) {
+    params.push(numerosContrato);
+    condiciones += ` AND numero_contrato = ANY($${params.length})`;
+  }
   return {
     cte: `WITH facturas_rango AS MATERIALIZED (SELECT consecutivo_rips FROM administrativo.rips_af WHERE ${condiciones}), facturas_canonicas AS MATERIALIZED (${sqlFacturasCanonicas(condiciones)})`,
     ref: "ARRAY(SELECT consecutivo_rips FROM facturas_rango)",
@@ -112,13 +186,16 @@ async function contarFacturasDelRango(fragmento: FragmentoRango): Promise<number
 }
 
 async function obtenerConsumoServicios(fragmento: FragmentoRango): Promise<FilaCrudaConsumo[]> {
+  // `joinCatalogoDeduplicado` (fix 2026-08-02): `codigo_interno` no es la PK
+  // real de `tb_cup` — sin deduplicar, un código con 2+ filas en el catálogo
+  // multiplicaría COUNT/SUM. Ver catalogo-codigos.ts.
   const sql = `
     ${fragmento.cte}
     SELECT ap.codigo_procedimiento AS codigo, cup.descripcion AS descripcion,
       COUNT(*) AS cantidad, SUM(ap.valor_procedimiento) AS valor
     FROM administrativo.rips_ap ap
     ${joinFacturaCanonica("ap")}
-    LEFT JOIN administrativo.tb_cup cup ON cup.codigo_interno = ap.codigo_procedimiento
+    ${joinCatalogoDeduplicado("tb_cup", "cup", "descripcion", "ap", "codigo_procedimiento")}
     WHERE ap.consecutivo_rips = ANY(${fragmento.ref})
     GROUP BY ap.codigo_procedimiento, cup.descripcion
   `;
@@ -128,13 +205,15 @@ async function obtenerConsumoServicios(fragmento: FragmentoRango): Promise<FilaC
 }
 
 async function obtenerConsumoMedicamentos(fragmento: FragmentoRango): Promise<FilaCrudaConsumo[]> {
+  // `joinCatalogoDeduplicado` (fix 2026-08-02) — mismo riesgo que en
+  // servicios, ahora contra `tb_medicamento`.
   const sql = `
     ${fragmento.cte}
     SELECT am.codigo_medicamento AS codigo, COALESCE(med.descripcion, MAX(am.nombre_medicamento)) AS descripcion,
       SUM(am.numero_unidades) AS cantidad, SUM(am.valor_total_medicamento) AS valor
     FROM administrativo.rips_am am
     ${joinFacturaCanonica("am")}
-    LEFT JOIN administrativo.tb_medicamento med ON med.codigo_interno = am.codigo_medicamento
+    ${joinCatalogoDeduplicado("tb_medicamento", "med", "descripcion", "am", "codigo_medicamento")}
     WHERE am.consecutivo_rips = ANY(${fragmento.ref})
     GROUP BY am.codigo_medicamento, med.descripcion
   `;
@@ -163,14 +242,16 @@ async function obtenerConsumoInsumos(fragmento: FragmentoRango): Promise<FilaCru
   // `LEFT JOIN tb_cup` como respaldo, mismo criterio ya aplicado en
   // "Análisis de Códigos de Mayor Impacto Económico" (ver
   // KnowledgeBase/05-ReglasNegocio/Contratación.md).
+  // `joinCatalogoDeduplicado` (fix 2026-08-02) — mismo riesgo que en
+  // servicios/medicamentos, ahora contra `tb_insumo` Y su respaldo `tb_cup`.
   const sql = `
     ${fragmento.cte}
     SELECT at2.codigo_servicio AS codigo, COALESCE(ins.descripcion, cup.descripcion) AS descripcion,
       SUM(at2.cantidad) AS cantidad, SUM(at2.valor_total_material) AS valor
     FROM administrativo.rips_at at2
     ${joinFacturaCanonica("at2")}
-    LEFT JOIN administrativo.tb_insumo ins ON ins.codigo_interno = at2.codigo_servicio
-    LEFT JOIN administrativo.tb_cup cup ON cup.codigo_interno = at2.codigo_servicio
+    ${joinCatalogoDeduplicado("tb_insumo", "ins", "descripcion", "at2", "codigo_servicio")}
+    ${joinCatalogoDeduplicado("tb_cup", "cup", "descripcion", "at2", "codigo_servicio")}
     WHERE at2.consecutivo_rips = ANY(${fragmento.ref})
     GROUP BY at2.codigo_servicio, ins.descripcion, cup.descripcion
   `;
@@ -182,7 +263,11 @@ async function obtenerConsumoInsumos(fragmento: FragmentoRango): Promise<FilaCru
 export async function getConsumoPrestador(
   codigoPrestador: string,
   fechaInicio: string,
-  fechaFin: string
+  fechaFin: string,
+  // "Consumo por contrato" (2026-08-02): filtro EXACTO por
+  // `rips_af.numero_contrato` — ver comentario grande al inicio del archivo.
+  // `null`/`undefined`/`[]` = comportamiento de siempre (todo el prestador).
+  numerosContrato?: string[] | null
 ): Promise<ResultadoConsumoPrestador | null> {
   // Defensa en profundidad: el cliente ya valida el rango antes de habilitar
   // "Consultar" (mismo `validarRangoConsumo`, única fuente de verdad), pero
@@ -197,7 +282,7 @@ export async function getConsumoPrestador(
   const resultPrestador = await pool.query(sqlPrestador, [codigoPrestador], `${SOURCE}/razon-social`);
   const razonSocial = resultPrestador?.rows?.[0]?.razon_social ?? codigoPrestador;
 
-  const fragmento = construirFragmentoRango(codigoPrestador, fechaInicio, fechaFin);
+  const fragmento = construirFragmentoRango(codigoPrestador, fechaInicio, fechaFin, numerosContrato);
   const totalFacturas = await contarFacturasDelRango(fragmento);
 
   if (totalFacturas === 0) {
@@ -211,16 +296,22 @@ export async function getConsumoPrestador(
     };
   }
 
-  const [servicios, medicamentos, insumos] = await Promise.all([
-    obtenerConsumoServicios(fragmento),
-    obtenerConsumoMedicamentos(fragmento),
-    obtenerConsumoInsumos(fragmento),
-  ]);
+  // SECUENCIAL, no Promise.all — precaución agregada 2026-08-02 al ampliar
+  // MAX_DIAS_RANGO_CONSUMO de 92 a 366 días: mismo criterio ya aplicado (y
+  // verificado necesario en producción) en "Top Impacto" tras un
+  // `TypeError: terminated` con consultas concurrentes contra el proxy. Aquí
+  // el riesgo es menor (1 solo prestador, no EPS-completa), pero con un
+  // rango 4x más ancho que antes cada consulta individual también es más
+  // pesada — se prioriza confiabilidad sobre velocidad, mismo principio ya
+  // documentado en el resto del proyecto.
+  const servicios = await obtenerConsumoServicios(fragmento);
+  const medicamentos = await obtenerConsumoMedicamentos(fragmento);
+  const insumos = await obtenerConsumoInsumos(fragmento);
 
   const filas: FilaConsumoCodigo[] = [
-    ...servicios.map((f) => construirFilaConsumo(f.codigo, f.descripcion ?? f.codigo, "servicios" as TipoConsumo, f.cantidad, f.valor)),
-    ...medicamentos.map((f) => construirFilaConsumo(f.codigo, f.descripcion ?? f.codigo, "medicamentos" as TipoConsumo, f.cantidad, f.valor)),
-    ...insumos.map((f) => construirFilaConsumo(f.codigo, f.descripcion ?? f.codigo, "insumos" as TipoConsumo, f.cantidad, f.valor)),
+    ...servicios.map((f) => construirFilaConsumo(f.codigo, f.descripcion, "servicios" as TipoConsumo, f.cantidad, f.valor)),
+    ...medicamentos.map((f) => construirFilaConsumo(f.codigo, f.descripcion, "medicamentos" as TipoConsumo, f.cantidad, f.valor)),
+    ...insumos.map((f) => construirFilaConsumo(f.codigo, f.descripcion, "insumos" as TipoConsumo, f.cantidad, f.valor)),
   ];
 
   // Mayor valor facturado primero — la vista más útil para identificar en
