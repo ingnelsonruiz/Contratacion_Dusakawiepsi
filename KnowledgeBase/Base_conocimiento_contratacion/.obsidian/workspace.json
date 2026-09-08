@@ -53,7 +53,9 @@
               "type": "file-explorer",
               "state": {
                 "sortOrder": "alphabetical",
-                "autoReveal": false
+                "autoReveal": false,
+                "showSearch": false,
+                "searchQuery": ""
               },
               "icon": "lucide-folder-closed",
               "title": "Explorador de archivos"
@@ -197,6 +199,14 @@
   },
   "active": "15afa7e8dd616a67",
   "lastOpenFiles": [
+    "Tareas_Pendientes.md",
+    "Estado_y_Roadmap.md",
+    "Bugs_y_Correcciones.md",
+    "Convenciones_y_Reglas_Criticas.md",
+    "Reglas_de_Negocio.md",
+    "Schema_Base_de_Datos.md",
+    "Stack_y_Arquitectura.md",
+    "HOME.md",
     "Bienvenido.md"
   ]
 }

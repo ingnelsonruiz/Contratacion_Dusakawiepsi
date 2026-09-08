@@ -13,7 +13,7 @@
  * Las tablas SIE existentes (rips_*, ct_*, tb_*) se consultan SOLO LECTURA.
  */
 
-const PROXY_URL = process.env.PROXY_URL || "https://pg-proxy.onrender.com/query";
+const PROXY_URL = process.env.PROXY_URL || "https://pg-proxy-7pdn.onrender.com/query";
 // Fallback de desarrollo (mismo valor que usa Proyecto_Dusakawi) para no depender de
 // .env.local mientras se configura el entorno local. En un despliegue real, definir
 // PROXY_API_KEY como variable de entorno propia y no depender de este valor por defecto.
