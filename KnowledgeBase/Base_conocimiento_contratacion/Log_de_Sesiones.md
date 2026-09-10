@@ -10,6 +10,27 @@ ultima_actualizacion: 2026-09-08
 
 ---
 
+## Sesión 2026-09-08 (tarde) — Migración 001 + Cambio de Proxy
+
+**Qué se hizo:**
+- Migración `001_negociacion_contratacion_usuario.sql` aplicada en `base_sie_dusakawi.administrativo` vía DBeaver.
+- Usuario `admin` creado con rol `admin` — login funcional en producción.
+- Proxy HTTP migrado de `pg-proxy.onrender.com` (suspendido) a `pg-proxy-7pdn.onrender.com`.
+- `src/lib/db.ts` actualizado: nuevo PROXY_URL y nuevo API_KEY (`v9mX7...BTx`).
+- Pendiente: actualizar variables de entorno en Vercel (`PROXY_URL` + `PROXY_API_KEY`) y hacer redeploy.
+
+**Archivos modificados:**
+- `src/lib/db.ts` — nuevo URL y API key del proxy
+- `scripts/migrate-and-seed.mjs` — script utilitario creado (nuevo)
+- `KnowledgeBase/Base_conocimiento_contratacion/Tareas_Pendientes.md` — migración 001 marcada ✅
+- `KnowledgeBase/Base_conocimiento_contratacion/Log_de_Sesiones.md` — este registro
+
+**Pendientes surgidos:**
+- Actualizar `PROXY_URL` y `PROXY_API_KEY` en Vercel + redeploy.
+- Aplicar migración 002 (`precio_referencia_eps`) — sigue pendiente.
+
+---
+
 ## Sesión 2026-09-08 — Creación de Base de Conocimiento
 
 **Qué se hizo:**

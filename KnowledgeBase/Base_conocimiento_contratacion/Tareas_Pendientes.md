@@ -12,7 +12,7 @@ ultima_actualizacion: 2026-09-08
 
 | Migración | Estado | Acción requerida |
 |---|---|---|
-| `db/migrations/001_negociacion_contratacion_usuario.sql` | ❌ NO aplicada | Ejecutar en DBeaver/psql antes de usar el sistema de login |
+| `db/migrations/001_negociacion_contratacion_usuario.sql` | ✅ APLICADA (2026-09-08) | Tabla creada en `base_sie_dusakawi.administrativo`. Usuario `admin` creado. |
 | `db/migrations/002_precio_referencia_eps.sql` | ❌ NO aplicada por defecto | Ejecutar manualmente O usar botón "Aplicar migración" (rol `admin`) en la UI |
 
 > Sin la migración `001`, el sistema de usuarios no funciona. Sin la `002`, la carga de archivos en `/precio-referencia-eps` falla con error de tabla inexistente.
@@ -60,7 +60,7 @@ Ingesta batch de datos SISMED / datos.gov.co como referencia de precios de merca
 Actualmente solo un placeholder visual. KPIs ejecutivos de alto nivel del proceso de negociación. Requiere `negociacion_contratacion_indicador_cache` para no recalcular en cada carga. Decisión de arquitectura pendiente sobre gestión de estado de filtros.
 
 ### Módulo 8 — Administración
-Gestión de usuarios, roles, auditoría de acciones, configuración de umbrales. Solo existe la tabla `negociacion_contratacion_usuario` (con DDL escrito pero no aplicado).
+Gestión de usuarios, roles, auditoría de acciones, configuración de umbrales. La tabla `negociacion_contratacion_usuario` ya está creada en BD (migración 001 aplicada 2026-09-08). Falta la UI de administración.
 
 ---
 
